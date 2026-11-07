@@ -2,26 +2,35 @@
 name = "pankarta-software"
 version = "0.1.0"
 edition = "2021"
+description = "A Rust game engine: wgpu rendering, rapier physics, SDL2 windowing, input and audio, with scenes made of nodes, properties and behaviours"
+license = "MIT"
+repository = "https://github.com/Khalzz/Pankarta-Software"
+readme = "README.md"
+keywords = ["gamedev", "engine", "wgpu", "3d", "game"]
+categories = ["game-engines", "rendering"]
+# What goes in the published crate: the engine, the fonts its UI embeds,
+# the examples and docs - not the SDL2 binaries or the examples' assets.
+include = ["src/**", "assets/fonts/Inter-*.ttf", "assets/fonts/Inter-LICENSE.txt", "examples/**", "docs/**", "Cargo.toml", "README.md", "LICENSE"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [dependencies]
-sdl2 = {version = "*", default-features = false, features = ["raw-window-handle" ]}
+sdl2 = {version = "0.37", default-features = false, features = ["raw-window-handle" ]}
 wgpu = "25"
-tokio = { version = "*", features = ["full"] }
-bytemuck = { version = "*", features = [ "derive" ] }
-image = { version = "*", default-features = false, features = ["png", "jpeg"] }
-anyhow = "*"
+tokio = { version = "1.45", features = ["full"] }
+bytemuck = { version = "1.23", features = [ "derive" ] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+anyhow = "1.0"
 rand = "0.8"
 glyphon = "0.9"
 rodio = "0.20"
 
 # Physics
-rapier3d = { version = "0.24", features = [ "simd-stable", "serde-serialize", "parallel" ] }
+rapier3d = { version = "0.26", features = [ "simd-stable", "serde-serialize", "parallel" ] }
 nalgebra = "0.33"
 
 # External file management
 serde = { version = "1.0", features = ["derive"] }
-ron = "*"
+ron = "0.10"
 
 # The game's debug windows (see DebugUi)
 egui = "0.32"

@@ -13,11 +13,11 @@ image = { version = "*", default-features = false, features = ["png", "jpeg"] }
 anyhow = "*"
 rand = "0.8"
 glyphon = "0.9"
-rodio = "*"
+rodio = "0.20"
 
 # Physics
-rapier3d = { version = "*", features = [ "simd-stable", "serde-serialize", "parallel" ] }
-nalgebra = "*"
+rapier3d = { version = "0.24", features = [ "simd-stable", "serde-serialize", "parallel" ] }
+nalgebra = "0.33"
 
 # External file management
 serde = { version = "1.0", features = ["derive"] }

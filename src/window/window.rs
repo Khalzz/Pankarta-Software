@@ -58,8 +58,14 @@ impl Window {
 
     pub(crate) fn new(video: VideoSubsystem) -> Result<Window, String> {
         let (width, height) = Self::DEFAULT_SIZE;
-        let window = video.window(Self::DEFAULT_TITLE, width, height)
-            .vulkan()
+        let mut builder = video.window(Self::DEFAULT_TITLE, width, height);
+        // macOS has no Vulkan of its own (asking SDL for a Vulkan window
+        // there needs MoltenVK installed) - wgpu draws with Metal instead.
+        #[cfg(target_os = "macos")]
+        builder.metal_view();
+        #[cfg(not(target_os = "macos"))]
+        builder.vulkan();
+        let window = builder
             .allow_highdpi()
             .resizable()
             .hidden()

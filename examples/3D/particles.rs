@@ -11,8 +11,7 @@
 
 use pankarta_software::particles::{Emitter, EmissionShape, Facing, Forces, ParticleEffect, TrailEffect};
 use pankarta_software::prelude::*;
-use pankarta_software::rendering::ui::ui::Ui;
-use pankarta_software::ui::layer::Layer;
+use pankarta_software::ui::ui_node::UiNode;
 use pankarta_software::ui::ui_transform::{PositionValue, SizeValue};
 use pankarta_software::ui::widgets::text;
 use pankarta_software::ui::TextStyle;
@@ -30,8 +29,8 @@ struct Orbit {
 impl Behavior for Orbit {
     fn update(&mut self, node: &mut Node, _scene: &mut SceneAccess, app: &mut App) {
         let dt = app.time.delta_time;
-        self.angle += input::get_axis("orbit_left", "orbit_right") * 1.2 * dt;
-        self.distance = (self.distance + input::get_axis("closer", "further") * 12.0 * dt).clamp(6.0, 60.0);
+        self.angle += app.input.get_axis("orbit_left", "orbit_right") * 1.2 * dt;
+        self.distance = (self.distance + app.input.get_axis("closer", "further") * 12.0 * dt).clamp(6.0, 60.0);
         if let Some(transform) = node.get_property_mut::<Transform3D>() {
             transform.position = Vector3::new(self.angle.sin() * self.distance, self.distance * 0.35, -self.angle.cos() * self.distance);
         }
@@ -49,7 +48,7 @@ impl Behavior for Spinner {
         if let Some(transform) = node.get_property_mut::<Transform3D>() {
             transform.rotation = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), self.speed * app.time.delta_time) * transform.rotation;
         }
-        if input::is_just_pressed("toggle_trails") {
+        if app.input.is_just_pressed("toggle_trails") {
             for name in ["left", "right"] {
                 if let Some(emitter) = scene.child_mut(&node.id, name).and_then(|child| child.get_property_mut::<Emitter>()) {
                     emitter.enabled = !emitter.enabled;
@@ -183,8 +182,9 @@ impl ParticlesScene {
 
         let ground = Node::new("ground")
             .with_property(Transform3D::default())
-            .with_property(Model::new(ModelSource::Plane { subdivisions: 0 }).with_scale(Vector3::new(200.0, 1.0, 200.0)))
-            .with_property(Material::standard().texture(GROUND_TEXTURE).tiled(4.0, TextureSpace::World));
+            .with_property(Mesh::plane(0)
+                .transform(Transform3D { scale: Vector3::new(200.0, 1.0, 200.0), ..Default::default() })
+                .material(Material::standard().texture(GROUND_TEXTURE).tiled(4.0, TextureSpace::World)));
 
         let sun = Node::new("sun")
             .with_property(Transform3D::facing(Vector3::new(-0.3, -1.0, -0.2)))
@@ -234,28 +234,35 @@ impl ParticlesScene {
         }
 
         // The frame rate top left, the controls bottom left.
-        let framerate = text(app, "- fps", &TextStyle::default())
+        let framerate = text("- fps", &TextStyle::default())
             .set_padding((10.0, 10.0))
             .set_size(SizeValue::Pixels(200.0), SizeValue::Fit);
-        let help = text(app, "A/D orbit   W/S zoom   Space trails   Q wind", &TextStyle::default())
+        let help = text("A/D orbit   W/S zoom   Space trails   Q wind", &TextStyle::default())
             .set_padding((10.0, 10.0))
             .set_size(SizeValue::Pixels(500.0), SizeValue::Fit)
             .set_position(PositionValue::Start(0.0), PositionValue::End(0.0));
-        Layer::new(app).set_child("framerate", framerate).set_child("help", help).build(app);
+        // A root as big as the window, so the help line can sit at its bottom.
+        let root = UiNode::container()
+            .set_size(SizeValue::Percent(100.0), SizeValue::Percent(100.0))
+            .set_child("framerate", framerate)
+            .set_child("help", help);
+        if let Err(error) = scene.spawn_node(app, Node::new("hud").with_property(UiLayer::new(root))) {
+            eprintln!("{error}");
+        }
 
         Self { windy: false }
     }
 }
 
 impl SceneBehaviour for ParticlesScene {
-    fn update(&mut self, _scene: &mut Scene, app: &mut App, _ctx: &mut FrameContext) {
-        if input::is_just_pressed("wind") {
+    fn update(&mut self, scene: &mut Scene, app: &mut App, _ctx: &mut FrameContext) {
+        if app.input.is_just_pressed("wind") {
             self.windy = !self.windy;
             app.particles.set_wind(if self.windy { Vector3::new(6.0, 0.0, 0.0) } else { Vector3::zeros() });
         }
-        if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "framerate").and_then(|node| node.as_label_mut()) {
+        if let Some(label) = scene.get_node_mut("hud").and_then(|node| node.get_property_mut::<UiLayer>()).and_then(|ui| ui.label_mut("framerate")) {
             let fps = app.time.fps().round();
-            label.set_text(&mut app.ui.text.font_system, &format!("{fps} fps"), true);
+            label.set_text(format!("{fps} fps"));
         }
     }
 }
@@ -274,7 +281,7 @@ async fn main() {
     app.renderer.set_vsync(false);
 
     for (action, key) in [("orbit_left", Key::A), ("orbit_right", Key::D), ("closer", Key::W), ("further", Key::S), ("toggle_trails", Key::Space), ("wind", Key::Q)] {
-        input::bind(action, InputSource::key(key));
+        app.input.bind(action, InputSource::key(key));
     }
 
     app.scene_manager.create_scene("main", ParticlesScene::new);

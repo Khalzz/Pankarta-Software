@@ -3,14 +3,13 @@
 //! field of view). Escape frees the mouse, and clicking takes it back.
 //!
 //! The ground is the engine's plane and the cubes its cube
-//! (`ModelSource::Plane`, `ModelSource::Cube`). Their textures are tiled (`Material::tiled`) at a fixed size however big each
+//! (`Mesh::plane`, `Mesh::cube`). Their textures are tiled (`Material::tiled`) at a fixed size however big each
 //! surface is - the ground's in the world, the cubes' on each cube, so it
 //! stays put on them. All loaded with the scene, through the AssetManager.
 
 use nalgebra::{UnitQuaternion, Vector2, Vector3};
 use pankarta_software::prelude::*;
-use pankarta_software::rendering::ui::ui::Ui;
-use pankarta_software::ui::layer::Layer;
+use pankarta_software::ui::ui_node::UiNode;
 use pankarta_software::ui::ui_transform::SizeValue;
 use pankarta_software::ui::widgets::text;
 use pankarta_software::ui::TextStyle;
@@ -97,18 +96,18 @@ impl MouseDiagnostic {
 impl Behavior for FreeCamera {
     fn update(&mut self, node: &mut Node, _scene: &mut SceneAccess, app: &mut App) {
         if let Some(diagnostic) = &mut self.diagnostic {
-            diagnostic.record(app.time.unscaled_delta_time, input::mouse_rel_x(), input::mouse_rel_y());
+            diagnostic.record(app.time.unscaled_delta_time, app.input.mouse_rel_x(), app.input.mouse_rel_y());
         }
-        if input::is_just_pressed(InputSource::key(Key::Escape)) {
+        if app.input.is_just_pressed(InputSource::key(Key::Escape)) {
             app.window.set_cursor_locked(false);
-        } else if input::mouse_left_button_just_pressed() {
+        } else if app.input.mouse_left_button_just_pressed() {
             app.window.set_cursor_locked(true);
         }
 
         if app.window.is_cursor_locked() {
             // The player's sensitivity is in mouse_look already - this
             // camera only says what one count of it turns.
-            let look = input::mouse_look() * RADIANS_PER_COUNT;
+            let look = app.input.mouse_look() * RADIANS_PER_COUNT;
             let dt = app.time.unscaled_delta_time;
             self.smoothed_look = if self.smoothing > 0.0 {
                 self.smoothed_look + (look - self.smoothed_look) * (1.0 - (-dt / self.smoothing).exp())
@@ -126,9 +125,9 @@ impl Behavior for FreeCamera {
 
         let forward = rotation * Vector3::z();
         let right = forward.cross(&Vector3::y()).normalize();
-        let walk = input::get_vector("left", "right", "forward", "back").normalize();
-        let climb = input::get_axis("down", "up");
-        let speed = if input::is_pressed("fast") { self.speed * 4.0 } else { self.speed };
+        let walk = app.input.get_vector("left", "right", "forward", "back").normalize();
+        let climb = app.input.get_axis("down", "up");
+        let speed = if app.input.is_pressed("fast") { self.speed * 4.0 } else { self.speed };
         let movement = (forward * -walk.0.y + right * walk.0.x + Vector3::y() * climb) * speed * app.time.unscaled_delta_time;
 
         if let Some(transform) = node.get_property_mut::<Transform3D>() {
@@ -137,7 +136,7 @@ impl Behavior for FreeCamera {
         }
         if let Some(lens) = node.get_property_mut::<CameraLens>() {
             let target = self.target_fov.get_or_insert(lens.fovy);
-            *target = (*target - input::mouse_scroll_y() * 3.0).clamp(15.0, 110.0);
+            *target = (*target - app.input.mouse_scroll_y() * 3.0).clamp(15.0, 110.0);
             // Eased the same at any frame rate.
             let ease = 1.0 - (-app.time.unscaled_delta_time / self.zoom_smoothing.max(0.0001)).exp();
             lens.fovy += (*target - lens.fovy) * ease;
@@ -153,8 +152,9 @@ impl FreeCameraScene {
 
         let ground = Node::new("ground")
             .with_property(Transform3D::default())
-            .with_property(Model::new(ModelSource::Plane { subdivisions: 0 }).with_scale(Vector3::new(200.0, 1.0, 200.0)))
-            .with_property(Material::standard().texture(GROUND_TEXTURE).tiled(4.0, TextureSpace::World));
+            .with_property(Mesh::plane(0)
+                .transform(Transform3D { scale: Vector3::new(200.0, 1.0, 200.0), ..Default::default() })
+                .material(Material::standard().texture(GROUND_TEXTURE).tiled(4.0, TextureSpace::World)));
 
         let camera = Node::new("camera")
             .with_property(Transform3D { position: Vector3::new(0.0, 2.0, -10.0), ..Default::default() })
@@ -172,8 +172,9 @@ impl FreeCameraScene {
             let height = 1.0 + (index % 4) as f32;
             nodes.push(Node::new(format!("cube_{index}"))
                 .with_property(Transform3D { position: Vector3::new(angle.sin() * 20.0, height / 2.0, angle.cos() * 20.0), ..Default::default() })
-                .with_property(Model::new(ModelSource::Cube).with_scale(Vector3::new(2.0, height, 2.0)))
-                .with_property(Material::standard().texture(CUBE_TEXTURES[index % 4]).tiled(1.0, TextureSpace::Object)));
+                .with_property(Mesh::cube()
+                    .transform(Transform3D { scale: Vector3::new(2.0, height, 2.0), ..Default::default() })
+                    .material(Material::standard().texture(CUBE_TEXTURES[index % 4]).tiled(1.0, TextureSpace::Object))));
         }
         for node in nodes {
             if let Err(error) = scene.spawn_node(app, node) {
@@ -182,10 +183,13 @@ impl FreeCameraScene {
         }
 
         // The frame rate, top left.
-        let framerate = text(app, "- fps", &TextStyle::default())
+        let framerate = text("- fps", &TextStyle::default())
             .set_padding((10.0, 10.0))
             .set_size(SizeValue::Pixels(200.0), SizeValue::Fit);
-        Layer::new(app).set_child("framerate", framerate).build(app);
+        let hud = Node::new("hud").with_property(UiLayer::new(UiNode::container().set_child("framerate", framerate)));
+        if let Err(error) = scene.spawn_node(app, hud) {
+            eprintln!("{error}");
+        }
 
         app.window.set_cursor_locked(true);
         Self
@@ -193,10 +197,10 @@ impl FreeCameraScene {
 }
 
 impl SceneBehaviour for FreeCameraScene {
-    fn update(&mut self, _scene: &mut Scene, app: &mut App, _ctx: &mut FrameContext) {
-        if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "framerate").and_then(|node| node.as_label_mut()) {
+    fn update(&mut self, scene: &mut Scene, app: &mut App, _ctx: &mut FrameContext) {
+        if let Some(label) = scene.get_node_mut("hud").and_then(|node| node.get_property_mut::<UiLayer>()).and_then(|ui| ui.label_mut("framerate")) {
             let fps = app.time.fps().round();
-            label.set_text(&mut app.ui.text.font_system, &format!("{fps} fps"), true);
+            label.set_text(format!("{fps} fps"));
         }
     }
 }
@@ -211,12 +215,12 @@ async fn main() {
         }
     };
 
-    input::set_mouse_sensitivity(2.0, 2.0);
+    app.input.set_mouse_sensitivity(2.0, 2.0);
     app.window.set_title("Free camera");
     app.renderer.set_vsync(false);
 
     for (action, key) in [("forward", Key::W), ("back", Key::S), ("left", Key::A), ("right", Key::D), ("up", Key::Space), ("down", Key::LCtrl), ("fast", Key::LShift)] {
-        input::bind(action, InputSource::key(key));
+        app.input.bind(action, InputSource::key(key));
     }
 
     app.scene_manager.create_scene("main", FreeCameraScene::new);

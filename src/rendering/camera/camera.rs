@@ -1,17 +1,17 @@
-use nalgebra::{Matrix4, Point3, Quaternion, UnitQuaternion, Vector3};
+use nalgebra::{Matrix4, Point3, UnitQuaternion, Vector3};
 
-use crate::transform::Transform;
+use crate::scene_manager::node::properties::Transform3D;
 
 #[derive(Copy, Clone, Debug)]
 pub struct Camera {
-    pub transform: Transform,
+    pub transform: Transform3D,
     pub look_at: Option<Point3<f32>>,
     pub up: Vector3<f32>,
     pub rotation_modifier: UnitQuaternion<f32>,
 }
 
 impl Camera {
-    pub fn new(transform: Transform) -> Self {
+    pub fn new(transform: Transform3D) -> Self {
         Self {
             transform,
             look_at: None,
@@ -62,7 +62,7 @@ impl Camera {
     }
 
     pub fn calc_forward_direction(&self) -> Vector3<f32> {
-        UnitQuaternion::from_quaternion(self.transform.rotation) * Vector3::new(1.0, 0.0, 0.0)
+        self.transform.rotation * Vector3::new(1.0, 0.0, 0.0)
     }
 
     pub fn calc_matrix(&self) -> Matrix4<f32> {
@@ -75,15 +75,14 @@ impl Camera {
     }
 }
 
-fn yaw_pitch_from_rotation(rotation: Quaternion<f32>) -> (f32, f32) {
-    let forward = UnitQuaternion::from_quaternion(rotation) * Vector3::new(1.0, 0.0, 0.0);
+fn yaw_pitch_from_rotation(rotation: UnitQuaternion<f32>) -> (f32, f32) {
+    let forward = rotation * Vector3::new(1.0, 0.0, 0.0);
     let yaw = forward.z.atan2(forward.x);
     let pitch = forward.y.clamp(-1.0, 1.0).asin();
     (yaw, pitch)
 }
 
-pub fn yaw_pitch_rotation(yaw_deg: f32, pitch_deg: f32) -> Quaternion<f32> {
-    let rotation = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), -yaw_deg.to_radians())
-        * UnitQuaternion::from_axis_angle(&Vector3::z_axis(), pitch_deg.to_radians());
-    *rotation
+pub fn yaw_pitch_rotation(yaw_deg: f32, pitch_deg: f32) -> UnitQuaternion<f32> {
+    UnitQuaternion::from_axis_angle(&Vector3::y_axis(), -yaw_deg.to_radians())
+        * UnitQuaternion::from_axis_angle(&Vector3::z_axis(), pitch_deg.to_radians())
 }

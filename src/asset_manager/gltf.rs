@@ -1,13 +1,18 @@
-use std::{collections::HashMap, collections::HashSet, path::Path};
-use gltf::{image,  Gltf};
-use nalgebra::{Quaternion, UnitQuaternion, Vector3};
-use wgpu::{util::DeviceExt, BindGroupLayout, Buffer, Device, Queue, SurfaceConfiguration};
-use serde::Deserialize;
+//! Reading `.gltf`/`.glb` model files - into a `Model` to draw (see
+//! `ModelLoad::load`), or just their triangles, for a physics collider.
 
-use crate::{app::App, asset_manager::{asset_path, normalize}, game_nodes::game_object::GameObject, rendering::{enviroment::environment::{clear_color, Environment, PreparedEnvironment, DEFAULT_CLEAR_COLOR}, enviroment::skybox_renderer::SkyboxRender, instance_management::InstanceRaw, models::model::{self, Mesh, Model}, models::textures::Texture}, transform::Transform};
-/// What `AssetManager::add_mesh` takes - one vertex: position, texture
-/// coordinates, normal.
-pub use crate::rendering::models::model::ModelVertex;
+use std::collections::HashMap;
+use std::path::Path;
+
+use gltf::{image, Gltf};
+use nalgebra::{Quaternion, UnitQuaternion, Vector3};
+use wgpu::util::DeviceExt;
+
+use crate::asset_manager::load_asset_binary;
+use crate::asset_manager::models::ModelGeometry;
+use crate::rendering::models::model::{self, Mesh, Model, ModelVertex};
+use crate::rendering::models::textures::Texture;
+use crate::scene_manager::node::properties::Transform3D;
 
 /// Flip to `true` to dump every model's materials/textures/primitives to
 /// stdout as it loads (see `model_log!` uses in `load_model_with` /
@@ -16,171 +21,6 @@ const DEBUG_MODEL_LOAD: bool = false;
 
 macro_rules! model_log {
     ($($arg:tt)*) => { if DEBUG_MODEL_LOAD { println!($($arg)*); } };
-}
-
-/// Which of a model's meshes skip backface culling - `DoubleSided`, owned,
-/// so it can be stored with a model's source until it's loaded (see
-/// `Model::double_sided`).
-#[derive(Debug, Clone, Default, Deserialize)]
-pub enum DoubleSidedMeshes {
-    #[default]
-    None,
-    All,
-    Meshes(Vec<String>),
-}
-
-/// Where a model comes from - a node's `Model::new(source)`. Whichever it
-/// is, it's loaded with the scene that uses it (under the loading screen) and
-/// shared by every node using the same one.
-#[derive(Debug, Clone, PartialEq)]
-pub enum ModelSource {
-    /// A model file (`.glb`/`.gltf`) in the assets folder, by its path there -
-    /// `ModelSource::file("models/f16.glb")`.
-    File(String),
-    /// A mesh the game made, by the name it was added under (see
-    /// `AssetManager::add_mesh`) - `ModelSource::mesh("terrain")`.
-    Mesh(String),
-    /// A 1 x 1 x 1 cube, centered on its node.
-    Cube,
-    /// A 1 x 1 square across X and Z, facing up, centered on its node -
-    /// `subdivisions` extra cuts along each side (0: one square), for a
-    /// shader that moves its vertices (waves) to have some to move.
-    Plane { subdivisions: u32 },
-}
-
-impl ModelSource {
-    /// The model file at `path` inside the assets folder.
-    pub fn file(path: impl Into<String>) -> Self {
-        Self::File(normalize(&path.into()))
-    }
-
-    /// The mesh the game added as `name` (see `AssetManager::add_mesh`).
-    pub fn mesh(name: impl Into<String>) -> Self {
-        Self::Mesh(name.into())
-    }
-
-    /// What its loaded copy is kept under (`ModelCache`) - the same for every
-    /// node using the same one, so it's loaded once.
-    pub fn key(&self) -> String {
-        match self {
-            Self::File(path) => normalize(path),
-            Self::Mesh(name) => format!("mesh:{name}"),
-            Self::Cube => "engine:cube".to_owned(),
-            Self::Plane { subdivisions } => format!("engine:plane:{subdivisions}"),
-        }
-    }
-}
-
-/// A mesh the game made - see `AssetManager::add_mesh`. Kept as it was given
-/// while the game runs; each scene that uses it builds its own GPU copy.
-#[derive(Debug)]
-pub struct MeshData {
-    pub vertices: Vec<ModelVertex>,
-    pub indices: Vec<u32>,
-}
-
-impl MeshData {
-    /// Whether its triangles make sense - `name` is for the message.
-    pub(crate) fn check(&self, name: &str) -> Result<(), String> {
-        if self.indices.len() % 3 != 0 {
-            return Err(format!("mesh '{name}': {} indices isn't a whole number of triangles", self.indices.len()));
-        }
-        if let Some(index) = self.indices.iter().find(|index| **index as usize >= self.vertices.len()) {
-            return Err(format!("mesh '{name}': index {index} is past its {} vertices", self.vertices.len()));
-        }
-        Ok(())
-    }
-}
-
-/// One model to load - the shared copy of a `ModelSource`, with what it
-/// needs to be built off the main thread (a scene's loading thread). Made by
-/// `AssetManager::model_load`.
-#[derive(Clone)]
-pub(crate) struct ModelLoad {
-    pub(crate) key: String,
-    geometry: LoadGeometry,
-    double_sided: DoubleSidedMeshes,
-}
-
-#[derive(Clone)]
-enum LoadGeometry {
-    /// Where the file is on disk - its buffers and textures are next to it.
-    File(std::path::PathBuf),
-    Mesh(std::sync::Arc<MeshData>),
-    Cube,
-    Plane(u32),
-}
-
-impl ModelLoad {
-    pub(crate) fn file(key: String, path: std::path::PathBuf, double_sided: DoubleSidedMeshes) -> Self {
-        Self { key, geometry: LoadGeometry::File(path), double_sided }
-    }
-
-    pub(crate) fn mesh(key: String, mesh: std::sync::Arc<MeshData>, double_sided: DoubleSidedMeshes) -> Self {
-        Self { key, geometry: LoadGeometry::Mesh(mesh), double_sided }
-    }
-
-    pub(crate) fn cube(key: String, double_sided: DoubleSidedMeshes) -> Self {
-        Self { key, geometry: LoadGeometry::Cube, double_sided }
-    }
-
-    pub(crate) fn plane(key: String, subdivisions: u32, double_sided: DoubleSidedMeshes) -> Self {
-        Self { key, geometry: LoadGeometry::Plane(subdivisions), double_sided }
-    }
-
-    /// Reads or builds the model and uploads it.
-    pub(crate) fn load(&self, device: &wgpu::Device, queue: &wgpu::Queue, transform_bind_group_layout: &wgpu::BindGroupLayout) -> anyhow::Result<Model> {
-        match &self.geometry {
-            LoadGeometry::File(path) => {
-                let names: Vec<&str> = match &self.double_sided {
-                    DoubleSidedMeshes::Meshes(names) => names.iter().map(String::as_str).collect(),
-                    _ => Vec::new(),
-                };
-                let double_sided = match &self.double_sided {
-                    DoubleSidedMeshes::None => DoubleSided::None,
-                    DoubleSidedMeshes::All => DoubleSided::All,
-                    DoubleSidedMeshes::Meshes(_) => DoubleSided::Meshes(&names),
-                };
-                let file_name = path.to_string_lossy().into_owned();
-                load_model_with(&file_name, &|file: &Path| Ok(std::fs::read(file)?), device, queue, transform_bind_group_layout, double_sided)
-            }
-            LoadGeometry::Mesh(mesh) => self.build(&mesh.vertices, &mesh.indices, device, queue, transform_bind_group_layout),
-            LoadGeometry::Cube => {
-                let (vertices, indices) = build_cube_mesh();
-                self.build(&vertices, &indices, device, queue, transform_bind_group_layout)
-            }
-            LoadGeometry::Plane(subdivisions) => {
-                let (vertices, indices) = build_plane_mesh(*subdivisions);
-                self.build(&vertices, &indices, device, queue, transform_bind_group_layout)
-            }
-        }
-    }
-
-    fn build(&self, vertices: &[ModelVertex], indices: &[u32], device: &wgpu::Device, queue: &wgpu::Queue, transform_bind_group_layout: &wgpu::BindGroupLayout) -> anyhow::Result<Model> {
-        let double_sided = match &self.double_sided {
-            DoubleSidedMeshes::None => false,
-            DoubleSidedMeshes::All => true,
-            DoubleSidedMeshes::Meshes(names) => names.iter().any(|name| *name == self.key),
-        };
-        build_mesh_model(&self.key, vertices, indices, double_sided, device, queue, transform_bind_group_layout).map_err(anyhow::Error::msg)
-    }
-}
-
-/// Reads a file inside the assets folder (see `AssetFolder::set_root`) - UI
-/// images, particle textures, skybox faces...
-pub fn load_asset_binary(file_name: &str) -> std::io::Result<Vec<u8>> {
-    std::fs::read(asset_path(file_name))
-}
-
-/// Loads a skybox cubemap from 6 face image files inside the assets folder,
-/// in +X, -X, +Y, -Y, +Z, -Z order.
-pub fn load_texture_cube(file_names: [&str; 6], device: &wgpu::Device, queue: &wgpu::Queue) -> anyhow::Result<Texture> {
-    let mut face_bytes: Vec<Vec<u8>> = Vec::with_capacity(6);
-    for file_name in file_names {
-        face_bytes.push(load_asset_binary(file_name)?);
-    }
-    let face_slices: [&[u8]; 6] = std::array::from_fn(|i| face_bytes[i].as_slice());
-    Texture::from_cube_bytes(face_slices, device, queue, "skybox_cube_texture")
 }
 
 /// A linear color channel (0..1) encoded to sRGB (0..1) - the standard
@@ -197,7 +37,7 @@ fn linear_to_srgb(linear: f32) -> f32 {
 /// Loads a `.gltf`/`.glb` through `read` - which turns a path (the model's
 /// own `file_name`, or one of its buffers/textures, resolved next to it)
 /// into bytes.
-fn load_model_with(file_name: &str, read: &dyn Fn(&Path) -> anyhow::Result<Vec<u8>>, device: &wgpu::Device, queue: &wgpu::Queue, transform_bind_group_layout: &wgpu::BindGroupLayout, double_sided: DoubleSided) -> anyhow::Result<Model> {
+pub(crate) fn load_model_with(file_name: &str, read: &dyn Fn(&Path) -> anyhow::Result<Vec<u8>>, device: &wgpu::Device, queue: &wgpu::Queue, transform_bind_group_layout: &wgpu::BindGroupLayout, double_sided: DoubleSided) -> anyhow::Result<Model> {
     // Gltf::from_slice auto-detects the format from the header, so this handles
     // both text .gltf (JSON) and binary .glb files.
     let gltf_data = read(Path::new(file_name))?;
@@ -448,53 +288,9 @@ fn load_model_with(file_name: &str, read: &dyn Fn(&Path) -> anyhow::Result<Vec<u
     })
 }
 
-/// A model's meshes' geometry, gathered while it loads - uploaded as one
-/// vertex and one index buffer for the whole model (see
-/// `model::Model::vertex_buffer`).
-#[derive(Default)]
-struct ModelGeometry {
-    vertices: Vec<ModelVertex>,
-    indices: Vec<u32>,
-}
-
-impl ModelGeometry {
-    /// Adds one mesh's vertices and indices - its indices kept as they are,
-    /// counting from its own first vertex. Its `(first_index, base_vertex)`
-    /// (see `model::Mesh`).
-    fn add(&mut self, vertices: &[ModelVertex], indices: &[u32]) -> (u32, i32) {
-        let placed = (self.indices.len() as u32, self.vertices.len() as i32);
-        self.vertices.extend_from_slice(vertices);
-        self.indices.extend_from_slice(indices);
-        placed
-    }
-
-    /// The model's vertex and index buffers. One with no geometry still gets
-    /// a (one-element) buffer each - wgpu won't make an empty one.
-    fn upload(mut self, device: &wgpu::Device, label: &str) -> (wgpu::Buffer, wgpu::Buffer) {
-        if self.vertices.is_empty() {
-            self.vertices.push(ModelVertex { position: [0.0; 3], tex_coords: [0.0; 2], normal: [0.0; 3] });
-        }
-        if self.indices.is_empty() {
-            self.indices.push(0);
-        }
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some(&format!("{label} vertex buffer")),
-            contents: bytemuck::cast_slice(&self.vertices),
-            // STORAGE: read as plain numbers by the wireframe debug view.
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::STORAGE,
-        });
-        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some(&format!("{label} index buffer")),
-            contents: bytemuck::cast_slice(&self.indices),
-            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::STORAGE,
-        });
-        (vertex_buffer, index_buffer)
-    }
-}
-
 /// Extracts a mesh's raw triangle geometry (world-space vertex positions +
 /// triangle indices, no GPU upload, no materials) from a `.gltf`/`.glb` file -
-/// for building a `game_object::ColliderShape::Trimesh` from a model's own
+/// for building a `ColliderShape::Trimesh` from a model's own
 /// shape instead of a hand-authored primitive (see that variant's own doc
 /// comment). Reads the file independently of `load_model_with`'s own
 /// GPU-facing load rather than reusing its result - a `Mesh` only keeps
@@ -533,51 +329,6 @@ pub fn load_trimesh_geometry(file_name: &str) -> anyhow::Result<(Vec<Vector3<f32
     }
 
     Ok((vertices, indices))
-}
-
-/// Every point of the mesh on the node named `node_name` in the model file
-/// at `path` (as `ModelSource::asset` takes it) - in the model's own space,
-/// placed by its node (and parents) like it's drawn.
-pub fn load_mesh_points(path: &Path, node_name: &str) -> anyhow::Result<Vec<Vector3<f32>>> {
-    let data = std::fs::read(path)?;
-    let gltf = Gltf::from_slice(&data)?;
-    let buffer_data = gltf.buffers().map(|buffer| match buffer.source() {
-        gltf::buffer::Source::Bin => Ok(gltf.blob.clone().unwrap_or_default()),
-        gltf::buffer::Source::Uri(uri) => Ok(std::fs::read(path.parent().unwrap_or(Path::new("")).join(uri))?),
-    }).collect::<anyhow::Result<Vec<Vec<u8>>>>()?;
-
-    fn find(node: gltf::Node<'_>, node_name: &str, buffer_data: &[Vec<u8>], parent: Option<(Vector3<f32>, UnitQuaternion<f32>, Vector3<f32>)>, points: &mut Vec<Vector3<f32>>) {
-        if node.name() == Some(node_name) {
-            collect_trimesh_geometry(node, buffer_data, parent, points, &mut Vec::new());
-            return;
-        }
-        // Its children are placed by it - the same composition as
-        // collect_trimesh_geometry's.
-        let (translation, rotation, scale) = node.transform().decomposed();
-        let (translation, rotation, scale) = (Vector3::from(translation), UnitQuaternion::from_quaternion(Quaternion::from(rotation)), Vector3::from(scale));
-        let placed = match parent {
-            Some((parent_translation, parent_rotation, parent_scale)) => (
-                parent_translation + parent_rotation * parent_scale.component_mul(&translation),
-                parent_rotation * rotation,
-                parent_scale.component_mul(&scale),
-            ),
-            None => (translation, rotation, scale),
-        };
-        for child in node.children() {
-            find(child, node_name, buffer_data, Some(placed), points);
-        }
-    }
-
-    let mut points = Vec::new();
-    for scene in gltf.scenes() {
-        for node in scene.nodes() {
-            find(node, node_name, &buffer_data, None, &mut points);
-        }
-    }
-    if points.is_empty() {
-        anyhow::bail!("{} has no mesh named '{node_name}'", path.display());
-    }
-    Ok(points)
 }
 
 // Recurses the same way traverse_node does (child transforms compose with
@@ -682,7 +433,7 @@ fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::D
             // Into the model's shared buffers (see ModelGeometry).
             let (first_index, base_vertex) = geometry.add(&vertices, &indices);
 
-            let transform: Transform;
+            let transform: Transform3D;
             let mut parent_values = None;
 
             match parent_transform {
@@ -691,24 +442,24 @@ fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::D
                     let (translation, rotation, scale) = node.transform().decomposed();
 
                     let position = Vector3::from(parent_translation) + Vector3::from(translation);
-                    let rotation = Quaternion::from(parent_rotation) * Quaternion::from(rotation);
+                    let rotation = UnitQuaternion::from_quaternion(Quaternion::from(parent_rotation) * Quaternion::from(rotation));
                     // Keep this node's own scale - parent scale is carried
                     // separately in `parent_values` below. Forcing (1,1,1) here
                     // silently dropped any per-node scale a glTF exporter left
                     // on a mesh node (Blender routinely does, e.g. Runway.glb's
                     // "Island" node), rendering it ~1/scale too small.
-                    transform = Transform::new(position, rotation, Vector3::from(scale));
-                    parent_values = Some(Transform::new(parent_translation.into(), parent_rotation.into(), parent_scale.into()));
+                    transform = Transform3D { position, rotation, scale: Vector3::from(scale) };
+                    parent_values = Some(Transform3D { position: parent_translation.into(), rotation: UnitQuaternion::from_quaternion(Quaternion::from(parent_rotation)), scale: parent_scale.into() });
                 },
                 None => {
                     let (translation, rotation, scale) = node.transform().decomposed();
-                    transform = Transform::new(translation.into(), rotation.into(), Vector3::from(scale));
+                    transform = Transform3D { position: translation.into(), rotation: UnitQuaternion::from_quaternion(Quaternion::from(rotation)), scale: Vector3::from(scale) };
                 },
             }
 
             // The corner is filled in once the geometry's bounds are known,
             // below.
-            let uniform = model::MeshUniform { matrix: transform.to_matrix_bufferable(), bounds_min: [0.0; 4] };
+            let uniform = model::MeshUniform { matrix: transform.matrix().into(), bounds_min: [0.0; 4] };
             let transform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(&format!("Transform Buffer")),
                 contents: bytemuck::cast_slice(&[uniform]),
@@ -782,7 +533,7 @@ fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::D
             // Where the node's own transform (already baked into `transform`
             // above) puts the primitive's AABB.
             let corner_after = |p: [f32; 3]| {
-                let m = transform.to_matrix_bufferable();
+                let m: [[f32; 4]; 4] = transform.matrix().into();
                 // column-major mat * (p, 1)
                 [
                     m[0][0] * p[0] + m[1][0] * p[1] + m[2][0] * p[2] + m[3][0],
@@ -838,54 +589,6 @@ fn add_or_init_mesh_list(mesh_lists: &mut HashMap<String, HashMap<String, Mesh>>
     }
 }
 
-/// Builds `environment` so it can be drawn (a skybox's textures loaded) -
-/// no `&mut App`, so it can run on a scene's loading thread (Device/Queue are
-/// cheap, Arc-backed clones). `camera_bind_group_layout` is the one piece
-/// `SkyboxRender::new` needs out of the camera's resources.
-pub fn prepare_environment(device: &Device, queue: &Queue, camera_bind_group_layout: &BindGroupLayout, config: &SurfaceConfiguration, environment: Environment) -> PreparedEnvironment {
-    let srgb = config.format.is_srgb();
-    let default_clear = clear_color(DEFAULT_CLEAR_COLOR, srgb);
-    match environment {
-        Environment::Color(color) => PreparedEnvironment { skybox: None, clear_color: clear_color(color, srgb) },
-        Environment::ProceduralSky { sun } => PreparedEnvironment {
-            skybox: Some(SkyboxRender::new_procedural(device, config, camera_bind_group_layout, sun)),
-            clear_color: default_clear,
-        },
-        Environment::Skybox(faces) => {
-            let texture = load_texture_cube(
-                [&faces.px, &faces.nx, &faces.py, &faces.ny, &faces.pz, &faces.nz],
-                device,
-                queue,
-            );
-
-            match texture {
-                Ok(texture) => PreparedEnvironment {
-                    skybox: Some(SkyboxRender::new(device, config, camera_bind_group_layout, texture)),
-                    clear_color: default_clear,
-                },
-                Err(err) => {
-                    eprintln!("Skybox faces couldn't be loaded, falling back to clear color: {err}");
-                    PreparedEnvironment { skybox: None, clear_color: default_clear }
-                }
-            }
-        }
-    }
-}
-
-pub fn create_instance_buffer(instances: &Vec<&GameObject>, device: &Device, camera_position: Vector3<f32>) -> Buffer {
-    let raw_instances: Vec<InstanceRaw> = instances.iter()
-    .map(|instance| instance.transform.to_raw(camera_position))
-    .collect();
-
-    device.create_buffer_init(
-        &wgpu::util::BufferInitDescriptor {
-            label: Some("Instance Buffer"),
-            contents: bytemuck::cast_slice(&raw_instances),
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-        }
-    )
-}
-
 /// Which of a model's meshes render with backface culling OFF (two-sided).
 /// Culling is ON by default (`None`). Declared here at registration rather
 /// than poked in later - it's a property of the asset. Mesh names are glTF
@@ -899,243 +602,13 @@ pub enum DoubleSided<'a> {
 }
 
 impl DoubleSided<'_> {
-    fn covers(&self, mesh_name: &str) -> bool {
+    pub(crate) fn covers(&self, mesh_name: &str) -> bool {
         match self {
             DoubleSided::None => false,
             DoubleSided::All => true,
             DoubleSided::Meshes(names) => names.contains(&mesh_name),
         }
     }
-}
-
-/// The model `load` describes - `variant`'s copy of it if there's one (see
-/// `Model::variant`) - taken from what the scene's loading step loaded, or
-/// loaded now if nothing has. Remembered as the scene's, so
-/// `unload_level_models` drops it when the scene ends.
-///
-/// A variant is a light copy of its base model (see `Model::share`): its own
-/// mesh transforms, the base's geometry and textures - the base loaded first
-/// if it isn't yet, and kept for whatever uses it plainly.
-pub(crate) fn load_scene_model(app: &mut App, load: &ModelLoad, variant: Option<&str>) -> Result<Model, String> {
-    let base_key = load.key.clone();
-    let key = variant_key(&base_key, variant);
-    if let Some(existing) = app.assets.models.idle.remove(&key) {
-        return Ok(existing);
-    }
-    if !app.assets.models.is_loaded(&base_key) {
-        let bind_group_layout = Mesh::create_bind_group_layout(&app.renderer.device);
-        let model = load.load(&app.renderer.device, &app.renderer.queue, &bind_group_layout)
-            .map_err(|e| format!("failed to load model '{base_key}': {e}"))?;
-        app.assets.models.scene_owned.insert(base_key.clone());
-        if variant.is_none() {
-            return Ok(model);
-        }
-        app.assets.models.idle.insert(base_key.clone(), model);
-    }
-    let base_model = app.assets.models.drawn.get(&base_key).map(|instanced| &instanced.model)
-        .or_else(|| app.assets.models.idle.get(&base_key))
-        .ok_or_else(|| format!("model '{base_key}' vanished while sharing it"))?;
-    let model = base_model.share(&app.renderer.device, &app.renderer.queue);
-    app.assets.models.scene_owned.insert(key);
-    Ok(model)
-}
-
-/// The key a `variant` of the model kept under `key` is kept under.
-pub(crate) fn variant_key(key: &str, variant: Option<&str>) -> String {
-    match variant {
-        Some(variant) => format!("{key}#{variant}"),
-        None => key.to_owned(),
-    }
-}
-
-/// Takes models a scene's loading thread already built (see
-/// `App::start_scene_load`) as this level's own - kept ready for
-/// `load_scene_model` to hand out, and dropped with the level like any
-/// other. One that failed is reported; spawning it then tries again itself.
-pub fn adopt_level_models(app: &mut App, models: Vec<(String, Result<Model, String>)>) {
-    for (key, model) in models {
-        match model {
-            Ok(model) => {
-                app.assets.models.idle.insert(key.clone(), model);
-                app.assets.models.scene_owned.insert(key);
-            }
-            Err(error) => eprintln!("{error}"),
-        }
-    }
-}
-
-/// Drops every model a scene loaded (see `load_scene_model`) - called as the
-/// scene ends, so the next one starts from only what it uses. A game's mesh
-/// goes too - its data stays in `AssetManager::add_mesh`'s, for the next
-/// scene using it to build again.
-///
-/// Models in `keep` (keys the next scene uses too) stay loaded, handed over
-/// to it: a restart of the same level reloads nothing.
-pub fn unload_level_models(app: &mut App, keep: &HashSet<String>) {
-    let level_keys = std::mem::take(&mut app.assets.models.scene_owned);
-    for (key, instanced) in std::mem::take(&mut app.assets.models.drawn) {
-        if !level_keys.contains(&key) || keep.contains(&key) {
-            app.assets.models.idle.insert(key, instanced.model);
-        }
-    }
-    app.assets.models.idle.retain(|key, _| !level_keys.contains(key) || keep.contains(key));
-    // Kept ones still belong to a level - the next one - and go when it ends
-    // (unless the one after keeps them too).
-    app.assets.models.scene_owned = level_keys.into_iter().filter(|key| keep.contains(key)).collect();
-}
-
-/// Builds a `Cube`'s raw geometry - 4 vertices per face (24 total) rather
-/// than 8 shared ones, since each face needs its own flat normal/UV, which a
-/// shared-corner vertex can't hold. Winding is CCW as viewed from outside
-/// each face, matching the engine's `FrontFace::Ccw` + back-face culling
-/// convention (see e.g. `light.rs`'s pipeline).
-fn build_cube_mesh() -> (Vec<ModelVertex>, Vec<u32>) {
-    // (normal, corners) per face - corners already in CCW-from-outside order.
-    let faces: [([f32; 3], [[f32; 3]; 4]); 6] = [
-        ([0.0, 0.0, 1.0], [[-0.5, -0.5, 0.5], [0.5, -0.5, 0.5], [0.5, 0.5, 0.5], [-0.5, 0.5, 0.5]]),
-        ([0.0, 0.0, -1.0], [[0.5, -0.5, -0.5], [-0.5, -0.5, -0.5], [-0.5, 0.5, -0.5], [0.5, 0.5, -0.5]]),
-        ([1.0, 0.0, 0.0], [[0.5, -0.5, 0.5], [0.5, -0.5, -0.5], [0.5, 0.5, -0.5], [0.5, 0.5, 0.5]]),
-        ([-1.0, 0.0, 0.0], [[-0.5, -0.5, -0.5], [-0.5, -0.5, 0.5], [-0.5, 0.5, 0.5], [-0.5, 0.5, -0.5]]),
-        ([0.0, 1.0, 0.0], [[-0.5, 0.5, 0.5], [0.5, 0.5, 0.5], [0.5, 0.5, -0.5], [-0.5, 0.5, -0.5]]),
-        ([0.0, -1.0, 0.0], [[-0.5, -0.5, -0.5], [0.5, -0.5, -0.5], [0.5, -0.5, 0.5], [-0.5, -0.5, 0.5]]),
-    ];
-    let uvs = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
-
-    let mut vertices = Vec::with_capacity(24);
-    let mut indices = Vec::with_capacity(36);
-    for (normal, corners) in faces {
-        let base = vertices.len() as u32;
-        for (corner, uv) in corners.iter().zip(uvs.iter()) {
-            vertices.push(ModelVertex { position: *corner, tex_coords: *uv, normal });
-        }
-        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-    }
-    (vertices, indices)
-}
-
-/// Builds a `Plane { subdivisions }`'s raw geometry - a `(subdivisions + 2)`-
-/// per-side grid of shared vertices (a flat plane has no per-face normal/UV
-/// seams to worry about, unlike `build_cube_mesh`), UVs spanning 0..1 across
-/// the whole grid. Winding is CCW as viewed from +Y, matching `normal`.
-fn build_plane_mesh(subdivisions: u32) -> (Vec<ModelVertex>, Vec<u32>) {
-    let segments = subdivisions + 1;
-    let verts_per_side = segments + 1;
-
-    let mut vertices = Vec::with_capacity((verts_per_side * verts_per_side) as usize);
-    for row in 0..verts_per_side {
-        for col in 0..verts_per_side {
-            let u = col as f32 / segments as f32;
-            let v = row as f32 / segments as f32;
-            vertices.push(ModelVertex { position: [u - 0.5, 0.0, v - 0.5], tex_coords: [u, v], normal: [0.0, 1.0, 0.0] });
-        }
-    }
-
-    let mut indices = Vec::with_capacity((segments * segments * 6) as usize);
-    for row in 0..segments {
-        for col in 0..segments {
-            let top_left = row * verts_per_side + col;
-            let top_right = top_left + 1;
-            let bottom_left = top_left + verts_per_side;
-            let bottom_right = bottom_left + 1;
-            indices.extend_from_slice(&[top_left, bottom_left, bottom_right, top_left, bottom_right, top_right]);
-        }
-    }
-    (vertices, indices)
-}
-
-/// A model of one mesh, `vertices` and `indices` (three a triangle,
-/// counter-clockwise seen from the front), plain white until a `Material`
-/// says otherwise - a `ModelSource::Cube`/`Plane`, or a game's mesh (see
-/// `AssetManager::add_mesh`). `name` is its mesh's name.
-pub(crate) fn build_mesh_model(name: &str, vertices: &[ModelVertex], indices: &[u32], double_sided: bool, device: &wgpu::Device, queue: &wgpu::Queue, transform_bind_group_layout: &wgpu::BindGroupLayout) -> Result<Model, String> {
-
-    let texture_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    multisampled: false,
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                count: None,
-            },
-        ],
-        label: Some("primitive_texture_bind_group_layout"),
-    });
-
-    let default_texture = Texture::from_image(
-        &::image::DynamicImage::ImageRgba8(::image::RgbaImage::from_pixel(1, 1, ::image::Rgba([255, 255, 255, 255]))),
-        device,
-        queue,
-        Some("primitive_default_texture"),
-    ).map_err(|e| format!("failed to build a default texture for primitive '{name}': {e}"))?;
-
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        layout: &texture_bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&default_texture.view) },
-            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&default_texture.sampler) },
-        ],
-        label: Some("primitive_material_bind_group"),
-    });
-
-    let materials = vec![model::Material { name: "Default Material".to_owned(), diffuse_texture: default_texture, bind_group }];
-
-    let mut geometry = ModelGeometry::default();
-    let (first_index, base_vertex) = geometry.add(vertices, indices);
-
-    // Identity - a primitive's actual placement/size comes from its node's
-    // own Transform3D, same as every mesh loaded via load_model_with.
-    let transform = Transform::new(Vector3::zeros(), Quaternion::identity(), Vector3::new(1.0, 1.0, 1.0));
-    let mut local_bounds = ([f32::MAX; 3], [f32::MIN; 3]);
-    for vertex in vertices {
-        for axis in 0..3 {
-            local_bounds.0[axis] = local_bounds.0[axis].min(vertex.position[axis]);
-            local_bounds.1[axis] = local_bounds.1[axis].max(vertex.position[axis]);
-        }
-    }
-    let transform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("primitive transform buffer"),
-        contents: bytemuck::cast_slice(&[model::MeshUniform::new(&transform, local_bounds)]),
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-    });
-    let transform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("primitive transform bind group"),
-        layout: transform_bind_group_layout,
-        entries: &[wgpu::BindGroupEntry { binding: 0, resource: transform_buffer.as_entire_binding() }],
-    });
-
-    let mesh = model::Mesh {
-        name: name.to_owned(),
-        first_index,
-        num_elements: indices.len() as u32,
-        base_vertex,
-        material: 0,
-        transform_buffer,
-        transform_bind_group,
-        transform,
-        base_transform: transform,
-        parent_transform: None,
-        alpha_mode: gltf::material::AlphaMode::Opaque,
-        double_sided,
-        local_bounds,
-    };
-    let mut opaque = HashMap::new();
-    opaque.insert(name.to_owned(), mesh);
-
-    let mut mesh_lists = HashMap::new();
-    mesh_lists.insert("opaque".to_owned(), opaque);
-
-    let (vertex_buffer, index_buffer) = geometry.upload(device, name);
-    Ok(model::Model { mesh_lists, materials, vertex_buffer, index_buffer })
 }
 
 #[cfg(test)]

@@ -1,29 +1,27 @@
-pub mod folder;
-pub mod images;
-pub mod models;
-pub mod sounds;
-pub mod textures;
-
-pub use folder::{asset_path, AssetFolder, DEFAULT_ROOT};
-pub(crate) use folder::normalize;
-pub use images::{Image, ImageCache};
-pub(crate) use images::load_image_file;
-pub use models::ModelCache;
-pub use sounds::{Clip, SoundCache};
-pub use textures::{ModelTexture, TextureCache};
-pub(crate) use textures::load_texture_file;
+//! `AssetManager` - `app.assets` - and reading a file in the assets folder.
 
 use std::sync::Arc;
 
 use wgpu::BindGroupLayout;
 
-use crate::resources::{DoubleSidedMeshes, MeshData, ModelLoad, ModelSource, ModelVertex};
+use super::folder::{asset_path, AssetFolder, DEFAULT_ROOT};
+use super::images::ImageCache;
+use super::models::{DoubleSidedMeshes, MeshData, ModelCache, ModelLoad, ModelSource};
+use super::sounds::SoundCache;
+use super::textures::TextureCache;
+use crate::rendering::models::model::ModelVertex;
+
+/// Reads a file inside the assets folder (see `AssetFolder::set_root`) - UI
+/// images, particle textures, skybox faces...
+pub fn load_asset_binary(file_name: &str) -> std::io::Result<Vec<u8>> {
+    std::fs::read(asset_path(file_name))
+}
 
 /// Everything the game loads goes through here - `app.assets`.
 ///
 /// The `folder` knows every file in the assets folder by name from the start,
 /// but reads none of them. A model or image is read the first time a scene
-/// uses it (under the loading screen), kept in its cache while any open scene
+/// uses it, kept in its cache while any open scene
 /// uses it, and dropped after - each loaded once, however many things use it.
 pub struct AssetManager {
     pub folder: AssetFolder,
@@ -49,9 +47,9 @@ impl AssetManager {
     /// Adds a mesh the game made - its `vertices` (position, texture
     /// coordinates, normal) and `indices` (three a triangle, counter-
     /// clockwise seen from the front) - as `name`, for nodes to draw with
-    /// `Model::new(ModelSource::mesh(name))`, placed, turned and sized by
+    /// `Mesh::custom(name)`, placed, turned and sized by
     /// their node like any model. Kept while the game runs; a scene using it
-    /// builds it with its other models, under the loading screen.
+    /// builds it with its other models in the background.
     pub fn add_mesh(&mut self, name: impl Into<String>, vertices: Vec<ModelVertex>, indices: Vec<u32>) -> Result<(), String> {
         let name = name.into();
         if self.models.meshes.contains_key(&name) {
@@ -77,6 +75,7 @@ impl AssetManager {
                 .ok_or_else(|| format!("there's no mesh '{name}' - add it with app.assets.add_mesh")),
             ModelSource::Cube => Ok(ModelLoad::cube(key, double_sided)),
             ModelSource::Plane { subdivisions } => Ok(ModelLoad::plane(key, *subdivisions, double_sided)),
+            ModelSource::Sphere | ModelSource::Cylinder | ModelSource::Capsule { .. } => Ok(ModelLoad::shape(key, source, double_sided)),
         }
     }
 }

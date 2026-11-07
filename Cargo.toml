@@ -73,6 +73,22 @@ path = "examples/3D/walking/main.rs"
 name = "particles"
 path = "examples/3D/particles.rs"
 
+[[example]]
+name = "text_and_lines"
+path = "examples/3D/text_and_lines.rs"
+
+[[example]]
+name = "meshes_and_models"
+path = "examples/3D/meshes_and_models.rs"
+
+[[example]]
+name = "far_from_origin"
+path = "examples/3D/far_from_origin.rs"
+
+[[example]]
+name = "scene_loading"
+path = "examples/scenes/loading.rs"
+
 [dependencies.gltf]
 version = "1.4"
 features = ["extras", "names", "utils"]

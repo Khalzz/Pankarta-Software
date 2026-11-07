@@ -1,5 +1,6 @@
 use wgpu::{util::DeviceExt, BindGroup, BindGroupLayout, Buffer, Device, RenderPipeline, SurfaceConfiguration};
 
+use crate::rendering::render_pipeline::shadow_renderer::MAX_CASCADES;
 use crate::rendering::{camera::handler::CameraResources, models::{model::{self, Vertex}, textures::Texture}, ui::rendering_utils};
 
 // Byte layout has to match WGSL's own struct-member-offset rule exactly
@@ -11,8 +12,10 @@ use crate::rendering::{camera::handler::CameraResources, models::{model::{self, 
 // camera_position(32..44)+_padding2(44..48), ambient(48..60)+_padding3(60..64).
 // camera_position starts exactly on a 16-byte boundary (32) so it needs no
 // extra padding before it either; _padding2 keeps ambient on the next one,
-// and _padding3 exists only because the struct's own alignment (16, from
-// the vec3s) requires the total size to be a multiple of 16, and 60 isn't.
+// and _padding3 brings shadow_view_proj to 64, the next 16-byte boundary a
+// mat4x4 aligns to - shadow_view_proj(64..320, 4 of them),
+// shadow_params(320..336), shadow_texels(336..352), 352 a multiple of 16 as
+// the struct's size has to be.
 // Getting this wrong doesn't error - the shader just silently reads whatever
 // raw bytes land at the offset it expects instead of the real value - burned
 // once already (see git history), so any new field added here needs the
@@ -35,7 +38,7 @@ pub struct LightUniform {
     pub time: f32,
     // Camera's true world-space position, same piggyback trick as `time`.
     // water.wgsl's vertex model matrix already bakes in camera-relative
-    // translation (see GameObject::to_raw), so this is what lets the wave
+    // translation (see InstanceRaw::from_transform), so this is what lets the wave
     // function recover true world position instead of sampling relative to
     // wherever the camera happens to be.
     pub camera_position: [f32; 3],
@@ -43,11 +46,23 @@ pub struct LightUniform {
     // The light from the whole sky - see `Renderer::set_ambient_light`.
     pub ambient: [f32; 3],
     pub _padding3: u32,
+    // Each cascade's view-projection - where a camera-relative position
+    // falls in its shadow map (see render_pipeline::shadow_renderer).
+    pub shadow_view_proj: [[[f32; 4]; 4]; MAX_CASCADES],
+    // How many cascades there are this frame (0: no shadows), one texel in a
+    // map's 0..1 coordinates, how soft the edges are, in texels
+    // (Shadows::softness), and nothing.
+    pub shadow_params: [f32; 4],
+    // How big a texel of each cascade's map is in the world.
+    pub shadow_texels: [f32; MAX_CASCADES],
 }
 
 pub struct LightRenderData {
     pub bind_group_layout: BindGroupLayout,
     pub bind_group: BindGroup,
+    /// `bind_group` with a stand-in for the shadow maps - what the shadow
+    /// pass binds, drawing into the real ones (see App::render_shadow_pass).
+    pub unshadowed_bind_group: BindGroup,
     pub buffer: Buffer,
     pub render_pipeline: RenderPipeline
 }
@@ -64,7 +79,9 @@ pub struct Light {
 }
 
 impl Light {
-    pub fn new(device: &Device, config: &SurfaceConfiguration, camera: &CameraResources) -> Self {
+    /// `shadow_map` is the sun's maps (see ShadowRender) - bound next to the
+    /// uniform, so everything drawing with the light can read them.
+    pub fn new(device: &Device, config: &SurfaceConfiguration, camera: &CameraResources, shadow_map: &Texture) -> Self {
         let uniform = LightUniform {
             position: [0.0, 5.0, 0.0],
             _padding: 0,
@@ -74,6 +91,9 @@ impl Light {
             _padding2: 0,
             ambient: [0.0, 0.0, 0.0],
             _padding3: 0,
+            shadow_view_proj: [[[0.0; 4]; 4]; MAX_CASCADES],
+            shadow_params: [0.0; 4],
+            shadow_texels: [0.0; MAX_CASCADES],
         };
 
         let buffer = device.create_buffer_init(
@@ -84,28 +104,12 @@ impl Light {
             }
         );
 
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-            label: None,
-        });
-
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: buffer.as_entire_binding(),
-            }],
-            label: None,
-        });
+        let bind_group_layout = Self::create_bind_group_layout(device);
+        let bind_group = Self::create_bind_group(device, &bind_group_layout, &buffer, shadow_map);
+        // The shadow pass binds the light without the shadow maps it's
+        // drawing into - a stand-in, never read, in their place.
+        let stand_in = Self::stand_in_shadow_map(device);
+        let unshadowed_bind_group = Self::create_bind_group(device, &bind_group_layout, &buffer, &stand_in);
 
         let render_pipeline = {
             let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -134,6 +138,7 @@ impl Light {
         let rendering_data = LightRenderData {
             bind_group_layout,
             bind_group,
+            unshadowed_bind_group,
             buffer,
             render_pipeline,
         };
@@ -142,5 +147,78 @@ impl Light {
             uniform,
             rendering_data,
         }
+    }
+
+    /// The light's bind group layout: the uniform, the shadow maps and their
+    /// sampler - group 3 of everything drawn.
+    pub fn create_bind_group_layout(device: &Device) -> BindGroupLayout {
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // The shadow maps (a layer a cascade), and their comparison
+            // sampler.
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                count: None,
+            }],
+            label: None,
+        })
+    }
+
+    /// A one-layer depth array, never drawn into or read - see
+    /// `unshadowed_bind_group`.
+    fn stand_in_shadow_map(device: &Device) -> Texture {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("shadow_map_stand_in"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: Texture::DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor { compare: Some(wgpu::CompareFunction::LessEqual), ..Default::default() });
+        Texture { texture, view, sampler }
+    }
+
+    fn create_bind_group(device: &Device, layout: &BindGroupLayout, buffer: &Buffer, shadow_map: &Texture) -> BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&shadow_map.view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&shadow_map.sampler) },
+            ],
+            label: None,
+        })
+    }
+
+    /// The shadow maps were made again (see ShadowRender::resize) - bind the new ones
+    /// (a bind group is tied to the texture it was made with).
+    pub fn rebind_shadow_map(&mut self, device: &Device, shadow_map: &Texture) {
+        let data = &mut self.rendering_data;
+        data.bind_group = Self::create_bind_group(device, &data.bind_group_layout, &data.buffer, shadow_map);
     }
 }

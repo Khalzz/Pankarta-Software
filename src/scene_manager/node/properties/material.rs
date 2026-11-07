@@ -70,6 +70,18 @@ impl Material {
         self.param("tile_size", tile_size).param("world", if space == TextureSpace::World { 1.0 } else { 0.0 })
     }
 
+    /// Builder: multiplies its texture by `color` - on its own, a plain
+    /// colored surface. Works on engine/standard (drawn with engine/colored
+    /// then), engine/tiled, and any shader with a `color: vec4<f32>` param.
+    pub fn color(mut self, color: crate::ui::color::UiColor) -> Self {
+        if self.shader == crate::rendering::shader_library::STANDARD {
+            self.shader = crate::rendering::shader_library::COLORED.to_owned();
+        }
+        let [r, g, b, a] = color.to_rgba_f32();
+        let linear = crate::rendering::sdf_text::srgb_to_linear;
+        self.param("color", [linear(r), linear(g), linear(b), a])
+    }
+
     /// Every texture it draws with - its own, and its meshes' materials'.
     pub fn textures(&self) -> impl Iterator<Item = &String> {
         self.texture.iter().chain(self.meshes.values().flat_map(|mesh| mesh.texture.iter()))

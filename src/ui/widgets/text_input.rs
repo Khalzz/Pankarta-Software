@@ -1,11 +1,12 @@
 //! A one-line box to type text into - a name, a seed, a server address.
 //!
-//!     let name = text_input(app, "Player name", &TextInputStyle::default());
-//!     Layer::new(app).set_child("name", name).build(app);
+//!     let name = text_input("Player name", &TextInputStyle::default());
+//!     Node::new("form").with_property(UiLayer::new(UiNode::container().set_child("name", name)))
 //!
-//!     // Later - what's been typed:
-//!     let value = Ui::get_ui_node(&mut app.ui.renderizable_elements, "name")
-//!         .and_then(|node| node.input_value());
+//!     // Later, from the node's behavior - what's been typed:
+//!     let value = node.get_property::<UiLayer>()
+//!         .and_then(|ui| ui.get("name"))
+//!         .and_then(|input| input.input_value());
 //!
 //! Click it to type (the border lights up and a caret blinks); click
 //! anywhere else, or press Enter or Escape, to stop. Backspace, Delete, the
@@ -20,11 +21,10 @@
 
 use glyphon::FontSystem;
 
-use crate::app::App;
 use crate::input::clipboard::{clipboard, set_clipboard};
-use crate::input::input::{self, TypedInput};
+use crate::input::input::{Input, TypedInput};
 use crate::ui::color::{Fill, UiColor};
-use crate::ui::components::label::{text_width, Font, DEFAULT_FONT_SIZE};
+use crate::ui::components::label::{text_width_with as text_width, Font, DEFAULT_FONT_SIZE};
 use crate::ui::text_style::TextStyle;
 use crate::ui::ui_node::{Style, UiNode, UiNodeContent};
 use crate::ui::ui_transform::{Padding, PositionValue, SizeValue};
@@ -146,10 +146,9 @@ impl TextInputStyle {
 }
 
 /// An empty text input showing `placeholder`, looking like `style`.
-pub fn text_input(app: &mut App, placeholder: &str, style: &TextInputStyle) -> UiNode {
-    let font_system = &mut app.ui.text.font_system;
-    let label = UiNode::label(font_system, placeholder, None, None)
-        .set_text_style(font_system, &style.text)
+pub fn text_input(placeholder: &str, style: &TextInputStyle) -> UiNode {
+    let label = UiNode::label(placeholder, None, None)
+        .set_text_style(&style.text)
         .set_text_color(style.placeholder_color)
         .set_size(SizeValue::Grow, SizeValue::Fit)
         .on_disabled(|disabled| disabled.set_text_color(UiColor::Rgba(255, 255, 255, 60)));
@@ -235,13 +234,13 @@ impl TextInputState {
     /// caret and selection into its children. `mouse_x`: the mouse from where
     /// the text starts; `text_room`: how wide the text's room is - both in UI
     /// units.
-    pub(crate) fn update(&mut self, content: &mut UiNodeContent, font_system: &mut FontSystem, clicked_inside: bool, delta_time: f32, mouse_x: f32, text_room: f32) {
+    pub(crate) fn update(&mut self, content: &mut UiNodeContent, font_system: &mut FontSystem, input: &Input, clicked_inside: bool, delta_time: f32, mouse_x: f32, text_room: f32) {
         let Some(metrics) = TextMetrics::of(content) else { return };
 
-        if input::mouse_left_button_just_pressed() {
+        if input.mouse_left_button_just_pressed() {
             if clicked_inside {
                 let at = self.char_at_x(font_system, &metrics, mouse_x, text_room);
-                let extend = input::shift_down() && self.focused;
+                let extend = input.shift_down() && self.focused;
                 if !extend {
                     self.anchor = Some(at);
                 }
@@ -252,7 +251,7 @@ impl TextInputState {
             self.focused = clicked_inside;
         }
         if self.dragging {
-            if input::mouse_left_button_down() {
+            if input.mouse_left_button_down() {
                 self.caret = self.char_at_x(font_system, &metrics, mouse_x, text_room);
             } else {
                 self.dragging = false;
@@ -261,8 +260,8 @@ impl TextInputState {
 
         if self.focused {
             self.blink += delta_time;
-            for typed in input::typed_input() {
-                if self.handle_typing(typed) {
+            for typed in input.typed_input() {
+                if self.handle_typing(typed.clone()) {
                     // Typing or moving shows the caret straight away.
                     self.blink = 0.0;
                 }
@@ -432,7 +431,7 @@ impl TextInputState {
                 "text" => {
                     child.style.text_color = Some(if empty { self.placeholder_color } else { self.text_color });
                     if let Some(label) = child.as_label_mut() {
-                        label.set_text(font_system, if empty { &self.placeholder } else { &self.value }, false);
+                        label.set_text_with(font_system, if empty { &self.placeholder } else { &self.value });
                     }
                 }
                 "caret" => {

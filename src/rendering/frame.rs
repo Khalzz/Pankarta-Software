@@ -9,7 +9,9 @@
 //! - `CopyDepth` - snapshots the depth so far, for passes after it whose
 //!   shaders read it (`reads: [Depth]` - water fading with depth, say);
 //! - `Particles` - smoke, flares, explosions, trails;
-//! - `Nodes2D` - the scene's 2D nodes' visuals (see `Shape2D`);
+//! - `Nodes3D` - the scene's 3D nodes' text and lines (see `Text`, `Line`),
+//!   over the world and hidden by it;
+//! - `Nodes2D` - the scene's 2D nodes' visuals (see `Shape2D`, `Text`, `Line`);
 //! - `Target`/`EndTarget` - the steps between draw into one of the game's
 //!   own images (see Renderer::add_target) instead of the screen (cleared
 //!   first if asked), for a later step to read - a HUD drawn apart, then
@@ -28,7 +30,7 @@
 //! shaders are still the engine's, by name.
 
 use crate::app::App;
-use crate::rendering::render_pipeline::render_pass::UiLayer;
+use crate::rendering::render_pipeline::render_pass::UiPass;
 
 /// A step's code, for `FrameStep::Custom`: the app, this frame's encoder,
 /// and the image the plan is drawing into at that point.
@@ -40,12 +42,13 @@ pub enum FrameStep {
     Scene { pass: String },
     CopyDepth,
     Particles,
+    Nodes3D,
     Nodes2D,
     Target { name: String, clear: bool },
     EndTarget,
     Lines { set: String },
     Text { set: String },
-    Ui { layer: UiLayer },
+    Ui { layer: UiPass },
     Fullscreen { shader: String },
     Custom { name: &'static str, run: CustomStep },
 }
@@ -57,6 +60,7 @@ impl FrameStep {
             FrameStep::Scene { pass } => format!("Scene \"{pass}\""),
             FrameStep::CopyDepth => "Copy depth".to_owned(),
             FrameStep::Particles => "Particles".to_owned(),
+            FrameStep::Nodes3D => "3D nodes".to_owned(),
             FrameStep::Nodes2D => "2D nodes".to_owned(),
             FrameStep::Target { name, .. } => format!("Target \"{name}\""),
             FrameStep::EndTarget => "End target".to_owned(),
@@ -85,16 +89,17 @@ impl FramePlan {
 
     /// What a scene draws when nothing says otherwise: the world (models,
     /// see-through models, particles), copied onto the screen (engine/blit),
-    /// the 2D nodes over it, and the UI over those. A game's own passes go in
-    /// with `insert_after_scene` and the like.
+    /// the 3D nodes' text and lines, the 2D nodes over them, and the UI over
+    /// those. A game's own passes go in with `insert_after_scene` and the like.
     pub fn engine_default() -> Self {
         Self::new()
             .scene("opaque")
             .scene("transparent")
             .particles()
             .fullscreen(crate::rendering::shader_library::BLIT)
+            .nodes_3d()
             .nodes_2d()
-            .ui(UiLayer::All)
+            .ui(UiPass::All)
     }
 
     fn step(mut self, step: FrameStep) -> Self {
@@ -112,6 +117,12 @@ impl FramePlan {
 
     pub fn particles(self) -> Self {
         self.step(FrameStep::Particles)
+    }
+
+    /// The scene's 3D nodes' text and lines, over the current target - after
+    /// the world, since the world's depth is what hides them.
+    pub fn nodes_3d(self) -> Self {
+        self.step(FrameStep::Nodes3D)
     }
 
     /// The scene's 2D nodes' visuals, over the current target.
@@ -138,7 +149,7 @@ impl FramePlan {
         self.step(FrameStep::Text { set: set.into() })
     }
 
-    pub fn ui(self, layer: UiLayer) -> Self {
+    pub fn ui(self, layer: UiPass) -> Self {
         self.step(FrameStep::Ui { layer })
     }
 

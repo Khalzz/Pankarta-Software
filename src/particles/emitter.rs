@@ -8,7 +8,7 @@ use super::effect::{ParticleEffect, TrailEffect};
 ///
 /// ```ignore
 /// Node::new("plane")
-///     .with_property(Model::new(..))
+///     .with_property(Mesh::cube())
 ///     .with_child(Node::new("left_wing")
 ///         .with_property(Transform3D { position: Vector3::new(-9.8, 0.4, 0.3), ..Default::default() })
 ///         .with_property(Emitter::trail(TrailEffect::new())))

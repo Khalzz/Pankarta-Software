@@ -14,9 +14,10 @@ use crate::rendering::models::model::Mesh;
 use crate::rendering::models::textures::Texture;
 use crate::rendering::render_pipeline::blur_renderer::{offscreen_texture, BlurRender};
 use crate::rendering::render_pipeline::depth_renderer::DepthRender;
+use crate::rendering::render_pipeline::shadow_renderer::{ShadowRender, Shadows};
 use crate::rendering::render_sets::RenderSets;
 use crate::rendering::shader_library::{Placement, ShaderLibrary, BUILTIN_SCREEN_INPUTS};
-use crate::window::window::Window;
+use crate::window::Window;
 
 pub struct Glyphon {
   pub(crate) cache: Cache,
@@ -31,6 +32,9 @@ pub struct Glyphon {
  * camera and light buffers, the environment, debug lines. What a scene
  * draws (its nodes, cameras) lives on the scene itself.
  */
+/// The `color` parameter's default for the built-in materials that have one.
+const WHITE_BY_DEFAULT: &str = "(params: { \"color\": (1.0, 1.0, 1.0, 1.0) })";
+
 pub struct Renderer {
   // 'static: create_surface_unsafe doesn't actually borrow the window (it
   // copies the raw window/display handles out), so there's no real lifetime
@@ -47,9 +51,15 @@ pub struct Renderer {
   /// The active camera's GPU buffer and bind group - filled from whichever
   /// camera the active scene has selected, every frame.
   pub camera_resources: CameraResources,
-  /// The sun's GPU buffer (direction, color, shader time, camera position) -
-  /// filled every frame from the active scene's sun `Light` node.
+  /// The sun's GPU buffer (direction, color, shader time, camera position,
+  /// shadow map) - filled every frame from the active scene's sun `Light`
+  /// node.
   pub light: Light,
+  /// The sun's shadow map and the pass drawing it - see
+  /// render_pipeline::shadow_renderer.
+  pub(crate) shadows: ShadowRender,
+  /// See `set_shadows`.
+  shadow_settings: Shadows,
   /// The shaders models are drawn with, by name (see
   /// rendering::shader_library) - and where each material in use is drawn
   /// this frame (worked out at the start of the frame plan).
@@ -62,8 +72,10 @@ pub struct Renderer {
   /// The fingerprint of what the last material setup read, and the
   /// Fullscreen steps it got ready - see App::place_materials.
   pub(crate) placed: Option<(u64, std::collections::HashSet<String>)>,
-  /// 2D nodes' shapes, refilled each frame (see App::prepare_nodes_2d).
+  /// 2D nodes' shapes, refilled each frame (see App::prepare_node_visuals).
   pub shapes_2d: crate::rendering::shapes_2d::Shapes2D,
+  /// Nodes' text and lines, refilled each frame (see rendering::node_visuals).
+  pub(crate) node_visuals: crate::rendering::node_visuals::NodeVisuals,
   /// What a frame draws, in order (see rendering::frame) - the active
   /// scene's, set in its start; back to `default_frame_plan` on a scene
   /// change.
@@ -193,7 +205,15 @@ impl Renderer {
     let blur = BlurRender::new(&device, &config);
 
     let camera_resources = CameraResources::new(&device, &config);
-    let light = Light::new(&device, &config, &camera_resources);
+    let shadow_settings = Shadows::default();
+    // The shadow pass is bound like the models are (see below).
+    let model_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Shadow pipeline layout"),
+        bind_group_layouts: &[&Texture::create_bind_group_layout(&device), &camera_resources.bind_group_layout, &Mesh::create_bind_group_layout(&device), &Light::create_bind_group_layout(&device)],
+        push_constant_ranges: &[],
+    });
+    let shadows = ShadowRender::new(&device, &shadow_settings, &model_layout, &camera_resources.bind_group_layout, config.format);
+    let light = Light::new(&device, &config, &camera_resources, &shadows.map);
 
     // Every model is drawn with a shader from here, by its material's name
     // (see rendering::shader_library) - built when first used, with these
@@ -214,7 +234,8 @@ impl Renderer {
     shaders.set_depth_copy(depth_render.foam_depth_copy.view.clone(), depth_render.foam_depth_copy.sampler.clone());
     shaders.set_screen_inputs(Self::screen_inputs(&blur, &HashMap::new()));
     // The toasts' icons (see widgets::toast).
-    shaders.add(crate::rendering::shader_library::TILED, include_str!("../shaders/materials/tiled.wgsl"), None);
+    shaders.add(crate::rendering::shader_library::TILED, include_str!("../shaders/materials/tiled.wgsl"), Some(WHITE_BY_DEFAULT));
+    shaders.add(crate::rendering::shader_library::COLORED, include_str!("../shaders/materials/colored.wgsl"), Some(WHITE_BY_DEFAULT));
     crate::ui::widgets::toast::add_icon_shaders(&mut shaders);
     // The dropdowns' chevron (see widgets::dropdown).
     crate::ui::widgets::dropdown::add_icon_shaders(&mut shaders);
@@ -225,7 +246,7 @@ impl Renderer {
 
 
     let environment = Environment::default();
-    let prepared_environment = crate::resources::prepare_environment(&device, &queue, &camera_resources.bind_group_layout, &config, environment.clone());
+    let prepared_environment = crate::rendering::enviroment::environment::prepare_environment(&device, &queue, &camera_resources.bind_group_layout, &config, environment.clone());
 
     Ok(Renderer {
       surface,
@@ -241,6 +262,8 @@ impl Renderer {
       },
       camera_resources,
       light,
+      shadows,
+      shadow_settings,
       shaders,
       material_placements: HashMap::new(),
       overlay_materials: HashMap::new(),
@@ -248,6 +271,7 @@ impl Renderer {
       shapes_2d,
       frame_plan: FramePlan::engine_default(),
       default_frame_plan: FramePlan::engine_default(),
+      node_visuals: Default::default(),
       render_sets: Default::default(),
       lines: Lines::default(),
       debug: DebugViews::default(),
@@ -360,7 +384,7 @@ impl Renderer {
   /// Sets what's drawn behind everything - a color, a skybox, the
   /// procedural sky - for every scene, until it's set again. Set from a
   /// scene's constructor, a skybox's textures load with the scene's assets,
-  /// under the loading screen; set while a scene runs, they're read on the
+  /// in the background; set while a scene runs, they're read on the
   /// spot.
   pub fn set_environment(&mut self, environment: Environment) {
     self.environment = environment;
@@ -380,9 +404,27 @@ impl Renderer {
     self.ambient_light = color;
   }
 
+  /// How shadows look, and whether there are any - see `set_shadows`.
+  pub fn shadows(&self) -> Shadows {
+    self.shadow_settings
+  }
+
+  /// Sets how every shadow looks - whether there are any at all, how far
+  /// from the camera they're drawn, in how many maps (cascades), each map's
+  /// resolution, how soft their edges are - for every scene, until it's set
+  /// again. With them on, a light casts them if it says so (`Light::shadows`,
+  /// on by default).
+  pub fn set_shadows(&mut self, shadows: Shadows) {
+    if self.shadows.needs_resize(&shadows) {
+      self.shadows.resize(&self.device, &shadows);
+      self.light.rebind_shadow_map(&self.device, &self.shadows.map);
+    }
+    self.shadow_settings = shadows;
+  }
+
   /// Builds `environment` (a skybox's textures, the procedural sky...) - on
   /// the main thread, for a change made while a scene runs.
   pub(crate) fn prepare_environment(&self, environment: Environment) -> PreparedEnvironment {
-    crate::resources::prepare_environment(&self.device, &self.queue, &self.camera_resources.bind_group_layout, &self.config, environment)
+    crate::rendering::enviroment::environment::prepare_environment(&self.device, &self.queue, &self.camera_resources.bind_group_layout, &self.config, environment)
   }
 }

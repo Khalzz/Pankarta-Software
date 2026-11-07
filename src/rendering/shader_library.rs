@@ -76,6 +76,7 @@ use serde::{Deserialize, Serialize};
 use crate::rendering::instance_management::InstanceRaw;
 use crate::rendering::models::model::{self, Vertex};
 use crate::rendering::models::textures::Texture;
+use crate::rendering::render_pipeline::shadow_renderer::create_shadow_pipeline;
 
 pub const STANDARD: &str = "engine/standard";
 pub const ERROR: &str = "engine/error";
@@ -83,6 +84,8 @@ pub const ERROR: &str = "engine/error";
 pub const BLIT: &str = "engine/blit";
 /// A material's texture repeated at a fixed size - see `Material::tiled`.
 pub const TILED: &str = "engine/tiled";
+/// engine/standard with a color - see `Material::color`.
+pub const COLORED: &str = "engine/colored";
 /// What UI boxes and images are drawn with unless they say otherwise.
 pub const UI: &str = "engine/ui";
 /// What SDF text sets are drawn with unless they say otherwise.
@@ -207,6 +210,12 @@ impl Overlay {
         }
     }
 
+    /// Whether it can be in the world, hidden by what's in front of it - a
+    /// node's text and lines (see rendering::node_visuals).
+    fn can_be_depth_tested(self) -> bool {
+        matches!(self, Overlay::Text | Overlay::Lines)
+    }
+
     /// Its bind group 2's layout - what the renderer drawing it binds there.
     fn bind_group_layout(self, device: &wgpu::Device) -> wgpu::BindGroupLayout {
         match self {
@@ -261,6 +270,11 @@ pub struct ShaderSettings {
     pub blend: Option<Blend>,
     pub cull: Cull,
     pub depth_write: bool,
+    /// Whether the solid meshes drawn with it (and the cut-out ones - alpha
+    /// mode Mask) cast the sun's shadow - true by default. A `vertex()` hook
+    /// that moves them (waves) is run for their shadow too, so it moves with
+    /// them.
+    pub casts_shadows: bool,
     /// Defaults for its `Params` fields, by name - a number, or a list (a
     /// vector, an array).
     pub params: BTreeMap<String, ParamValue>,
@@ -279,6 +293,7 @@ impl Default for ShaderSettings {
             blend: None,
             cull: Cull::Back,
             depth_write: true,
+            casts_shadows: true,
             params: BTreeMap::new(),
             textures: BTreeMap::new(),
             reads: Vec::new(),
@@ -439,7 +454,15 @@ struct Shader {
     module: Option<wgpu::ShaderModule>,
     pipelines: HashMap<PipelineKey, wgpu::RenderPipeline>,
     /// A 2D shader's pipeline for each thing it draws.
-    overlays: HashMap<Overlay, wgpu::RenderPipeline>,
+    /// By 2D thing, and whether the world's depth hides it.
+    overlays: HashMap<(Overlay, bool), wgpu::RenderPipeline>,
+    /// Whether its vertex code can move a mesh's vertices - a Surface
+    /// shader with a `vertex()` hook, any Raw one - so its shadow has to be
+    /// drawn with it (`shadow`), not the shadow pass's own.
+    moves_vertices: bool,
+    /// Its pipeline for the shadow pass, when it moves vertices and casts
+    /// shadows - see render_pipeline::shadow_renderer.
+    shadow: Option<wgpu::RenderPipeline>,
     /// Its files - built again when one changes.
     watch: Watch,
     /// Its own bind group 0, when it has params or textures - otherwise it
@@ -673,8 +696,18 @@ impl ShaderLibrary {
     /// The material `key`'s pipeline for `overlay` and its bind group 0, once
     /// `prepare_overlay` has made them.
     pub fn overlay(&self, key: &str, overlay: Overlay) -> Option<(&wgpu::RenderPipeline, &wgpu::BindGroup)> {
+        self.overlay_pipeline(key, overlay, false)
+    }
+
+    /// `overlay`, hidden by the world's depth - drawn in a pass with the
+    /// depth attached.
+    pub fn overlay_depth_tested(&self, key: &str, overlay: Overlay) -> Option<(&wgpu::RenderPipeline, &wgpu::BindGroup)> {
+        self.overlay_pipeline(key, overlay, true)
+    }
+
+    fn overlay_pipeline(&self, key: &str, overlay: Overlay, depth_tested: bool) -> Option<(&wgpu::RenderPipeline, &wgpu::BindGroup)> {
         let shader = self.built.get(self.shader_name(key))?.as_ref().ok()?;
-        let pipeline = shader.overlays.get(&overlay)?;
+        let pipeline = shader.overlays.get(&(overlay, depth_tested))?;
         let bind_group = self.instances.get(key)?.bind_groups.get("")?.get(&0)?;
         Some((pipeline, bind_group))
     }
@@ -865,6 +898,13 @@ impl ShaderLibrary {
     /// built it.
     pub fn settings(&self, key: &str) -> Option<&ShaderSettings> {
         self.built.get(self.shader_name(key))?.as_ref().ok().map(|shader| &shader.settings)
+    }
+
+    /// The material `key`'s pipeline for the shadow pass, when its shader
+    /// moves vertices (see `Shader::shadow`) - None: it casts with the
+    /// shadow pass's own.
+    pub fn shadow_pipeline(&self, key: &str) -> Option<&wgpu::RenderPipeline> {
+        self.built.get(self.shader_name(key))?.as_ref().ok()?.shadow.as_ref()
     }
 
     /// Whether the material `key`'s shader reads the depth so far (`reads:
@@ -1142,7 +1182,12 @@ impl ShaderLibrary {
         let fullscreen = settings.kind == Kind::Fullscreen;
         let inputs = if fullscreen { settings.inputs.clone() } else { Vec::new() };
         let group0 = (fullscreen || params.is_some() || !textures.is_empty() || depth).then(|| self.make_group0(name, params, textures, depth, settings.kind, inputs));
-        Ok(Shader { settings, module: Some(module), pipelines: HashMap::new(), overlays: HashMap::new(), watch, group0, generation })
+        let moves_vertices = match settings.kind {
+            Kind::Surface => code_of(&wgsl).contains("fn vertex("),
+            Kind::Raw => true,
+            _ => false,
+        };
+        Ok(Shader { settings, module: Some(module), pipelines: HashMap::new(), overlays: HashMap::new(), moves_vertices, shadow: None, watch, group0, generation })
     }
 
     /// Builds a 2D shader - its hook in each of its kind's templates, and a
@@ -1180,13 +1225,18 @@ impl ShaderLibrary {
                 label: Some(name),
                 source: wgpu::ShaderSource::Wgsl(program.into()),
             })).map_err(|error| format!("the GPU refused it: {error}"))?;
-            let pipeline = caught(&device, || self.make_overlay_pipeline(name, &module, &group0.layout, overlay, blend)).map_err(|error| format!("the GPU refused its pipeline: {error}"))?;
-            overlays.insert(overlay, pipeline);
+            for depth_tested in [false, true] {
+                if depth_tested && !overlay.can_be_depth_tested() {
+                    continue;
+                }
+                let pipeline = caught(&device, || self.make_overlay_pipeline(name, &module, &group0.layout, overlay, blend, depth_tested)).map_err(|error| format!("the GPU refused its pipeline: {error}"))?;
+                overlays.insert((overlay, depth_tested), pipeline);
+            }
         }
-        Ok(Shader { settings, module: None, pipelines: HashMap::new(), overlays, watch, group0: Some(group0), generation })
+        Ok(Shader { settings, module: None, pipelines: HashMap::new(), overlays, moves_vertices: false, shadow: None, watch, group0: Some(group0), generation })
     }
 
-    fn make_overlay_pipeline(&self, name: &str, module: &wgpu::ShaderModule, group0: &wgpu::BindGroupLayout, overlay: Overlay, blend: Blend) -> wgpu::RenderPipeline {
+    fn make_overlay_pipeline(&self, name: &str, module: &wgpu::ShaderModule, group0: &wgpu::BindGroupLayout, overlay: Overlay, blend: Blend, depth_tested: bool) -> wgpu::RenderPipeline {
         let layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some(name),
             bind_group_layouts: &[group0, &self.groups[1], &self.overlay_layouts[&overlay], &self.groups[3]],
@@ -1208,7 +1258,15 @@ impl ShaderLibrary {
                 cull_mode: overlay.cull(),
                 ..Default::default()
             },
-            depth_stencil: None,
+            // Hidden by the world, without hiding anything itself.
+            depth_stencil: depth_tested.then(|| wgpu::DepthStencilState {
+                format: Texture::DEPTH_FORMAT,
+                depth_write_enabled: false,
+                // Reversed-Z, like the world's.
+                depth_compare: wgpu::CompareFunction::Greater,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
             cache: None,
@@ -1285,7 +1343,8 @@ impl ShaderLibrary {
             return Err("it isn't built".to_owned());
         };
         let missing: Vec<PipelineKey> = placement.keys(&shader.settings).into_iter().filter(|key| !shader.pipelines.contains_key(key)).collect();
-        if missing.is_empty() {
+        let shadow_missing = name != ERROR && shader.moves_vertices && shader.settings.casts_shadows && shader.shadow.is_none();
+        if missing.is_empty() && !shadow_missing {
             return Ok(());
         }
         let Some(module) = shader.module.clone() else { return Ok(()) };
@@ -1302,8 +1361,24 @@ impl ShaderLibrary {
                 }
             }
         }
+        // Its shadow - drawn by its own vertex code, so it moves with it. One
+        // the GPU won't take casts its plain shape instead (said once).
+        let shadow = if shadow_missing {
+            match caught(&self.device, || create_shadow_pipeline(&self.device, name, &layout, &module, None)) {
+                Ok(pipeline) => Some(pipeline),
+                Err(error) => {
+                    self.report_note(name, &format!("its shadow can't follow its vertex() hook (the GPU refused its shadow pipeline: {error}) - it casts its plain shape"));
+                    None
+                }
+            }
+        } else {
+            None
+        };
         if let Some(Ok(shader)) = self.built.get_mut(name) {
             shader.pipelines.extend(made);
+            if shadow.is_some() {
+                shader.shadow = shadow;
+            }
         }
         Ok(())
     }

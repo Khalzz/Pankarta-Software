@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use nalgebra::{vector, Point3, Unit, UnitQuaternion, Vector3};
 use rapier3d::prelude::*;
 
-use crate::game_nodes::game_object;
+use crate::physics::body;
 
 /// A body loaded from a `PhysicsObjectDef`, and its colliders.
 pub struct PhysicsData {
@@ -21,7 +21,7 @@ pub struct PhysicsData {
 /// (1,1,1) and scaled up to its real-life size (colliders/positions authored to match)
 /// gets physically appropriate rotational resistance automatically, with no per-plane
 /// hand-tuning of inertia required.
-pub(crate) fn compute_principal_inertia(mass: f32, center_of_mass: Vector3<f32>, colliders: &[game_object::Collider]) -> Vector3<f32> {
+pub(crate) fn compute_principal_inertia(mass: f32, center_of_mass: Vector3<f32>, colliders: &[body::Collider]) -> Vector3<f32> {
     struct BoxPart {
         volume: f32,
         half_extents: (f32, f32, f32),
@@ -31,13 +31,13 @@ pub(crate) fn compute_principal_inertia(mass: f32, center_of_mass: Vector3<f32>,
     let boxes: Vec<BoxPart> = colliders.iter().filter_map(|collider| {
         let offset = collider.offset;
         match &collider.shape {
-            game_object::ColliderShape::Cuboid { half_extents } => Some(BoxPart {
+            body::ColliderShape::Cuboid { half_extents } => Some(BoxPart {
                 volume: 8.0 * half_extents.0 * half_extents.1 * half_extents.2,
                 half_extents: *half_extents,
                 position: (offset.x, offset.y, offset.z),
             }),
             // Counted as the box around it.
-            game_object::ColliderShape::ConvexHull { points } if !points.is_empty() => {
+            body::ColliderShape::ConvexHull { points } if !points.is_empty() => {
                 let (low, high) = points.iter().fold((points[0], points[0]), |(low, high), point| (low.inf(point), high.sup(point)));
                 let half = (high - low) * 0.5;
                 let center = (high + low) * 0.5 + offset;
@@ -81,7 +81,7 @@ pub(crate) fn compute_principal_inertia(mass: f32, center_of_mass: Vector3<f32>,
 /// plus the position and rotation it was spawned at - what its body is made
 /// from, extracted once at spawn time the same way
 /// `render_bridge::register_static_model` extracts `Transform3D`+`Model` into
-/// a plain `GameObject` for rendering. Collected on
+/// an `InstanceData` for rendering. Collected on
 /// `SceneContent::physics_bodies` while the scene is built, and made into
 /// bodies when its physics starts (see `PhysicsWorld::start`) - a node
 /// spawned after that gets its body right away.
@@ -90,7 +90,7 @@ pub struct PhysicsObjectDef {
     pub id: String,
     pub position: Vector3<f32>,
     pub rotation: UnitQuaternion<f32>,
-    pub physics: game_object::Physics,
+    pub physics: body::Physics,
 }
 
 /// Seeds `collider_set`/`rigidbody_set` from the scene's `PhysicsObjectDef`s
@@ -149,8 +149,8 @@ pub fn load_physics_from_definitions(defs: &[PhysicsObjectDef], collider_set: &m
 
 /// The Rapier collider for `shape` - None (and said why) for one that can't
 /// be built. `id` is the body's node, for the message.
-fn collider_builder(shape: &game_object::ColliderShape, id: &str) -> Option<ColliderBuilder> {
-    use game_object::ColliderShape;
+fn collider_builder(shape: &body::ColliderShape, id: &str) -> Option<ColliderBuilder> {
+    use body::ColliderShape;
     match shape {
         ColliderShape::Cuboid { half_extents } => Some(ColliderBuilder::cuboid(half_extents.0, half_extents.1, half_extents.2)),
         ColliderShape::Capsule { half_height, radius } => Some(ColliderBuilder::capsule_y(*half_height, *radius)),

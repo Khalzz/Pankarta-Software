@@ -2,7 +2,7 @@
 //! on screen, with its edge worked out per pixel so circles and turned
 //! rectangles come out smooth (shapes_2d.wgsl).
 //!
-//! Refilled every frame from the scene's nodes (see App::prepare_nodes_2d),
+//! Refilled every frame from the scene's nodes (see App::prepare_node_visuals),
 //! already in drawing order, and drawn over what's there with alpha blending
 //! and no depth test - the `Nodes2D` step of the frame plan.
 
@@ -163,21 +163,15 @@ impl Shapes2D {
         queue.write_buffer(&self.screen_buffer, 0, bytemuck::cast_slice(&[screen_px.0 as f32, screen_px.1 as f32, 0.0, 0.0]));
     }
 
-    /// Draws this frame's shapes over `view` - nothing when there are none.
-    pub(crate) fn draw(&self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
+    /// Draws `range` of this frame's shapes - a run of them in the order of
+    /// the nodes' visuals (see rendering::node_visuals).
+    pub(crate) fn draw_range(&self, render_pass: &mut wgpu::RenderPass<'_>, range: std::ops::Range<u32>) {
         if self.count == 0 {
             return;
         }
-        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("Shapes 2D pass"),
-            color_attachments: &[crate::rendering::render_pipeline::render_pass::color_attachment(view, wgpu::LoadOp::Load)],
-            depth_stencil_attachment: None,
-            occlusion_query_set: None,
-            timestamp_writes: None,
-        });
         render_pass.set_pipeline(&self.pipeline);
         render_pass.set_bind_group(0, &self.screen_bind_group, &[]);
         render_pass.set_vertex_buffer(0, self.instances.slice(..));
-        render_pass.draw(0..6, 0..self.count);
+        render_pass.draw(0..6, range);
     }
 }

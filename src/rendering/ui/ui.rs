@@ -1,8 +1,8 @@
 use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex, MutexGuard, TryLockError};
 use crate::app::Size;
 
 use glyphon::{Cache, FontSystem, SwashCache, TextAtlas, TextRenderer};
-use ron::from_str;
 use wgpu::{util::DeviceExt, BindGroup, BindGroupLayout, BindGroupLayoutDescriptor, Buffer, Device, Queue, SurfaceConfiguration};
 
 use crate::rendering::models::textures::Texture;
@@ -10,11 +10,36 @@ use crate::rendering::render_pipeline::blur_renderer::BlurRender;
 use crate::rendering::shader_library::UI;
 use crate::scene_manager::node::properties::Material;
 use crate::rendering::vertex::{ImageVertex, VertexUi};
-use crate::ui::ui_structure::UiStructure;
-use crate::ui::ui_node::{UiNode, UiNodeContent};
+use crate::ui::ui_node::UiNode;
 use crate::ui::widgets::toast::Toasts;
-use crate::window::window::CursorIcon;
+use crate::window::CursorIcon;
 
+
+/// The fonts every piece of UI text is shaped with - one for the whole
+/// engine, so building UI (`text("Hi", ..)`, `label.set_text(..)`) needs
+/// nothing passed in. The engine's own fonts are loaded the first time it's
+/// used.
+static FONT_SYSTEM: LazyLock<Mutex<FontSystem>> = LazyLock::new(|| {
+    let mut font_system = FontSystem::new();
+    font_system.db_mut().load_font_data(include_bytes!("../../../assets/fonts/Inter-Thin.ttf").to_vec());
+    // Regular weight of the same family, for labels that ask for it by
+    // name (`Font { family: Some("Inter"), .. }`) - loading it doesn't
+    // change what the default sans-serif labels resolve to.
+    font_system.db_mut().load_font_data(include_bytes!("../../../assets/fonts/Inter-Regular.ttf").to_vec());
+    Mutex::new(font_system)
+});
+
+/// The shared font system (see `FONT_SYSTEM`), for as long as the guard
+/// lives. Taken once per call that shapes text - never while it's already
+/// held (the UI's drawing pass holds it, and hands it down instead): that
+/// would wait on itself forever, so it panics saying so.
+pub(crate) fn font_system() -> MutexGuard<'static, FontSystem> {
+    match FONT_SYSTEM.try_lock() {
+        Ok(guard) => guard,
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(TryLockError::WouldBlock) => panic!("the UI's font system is already in use - text was changed from inside the UI's own drawing pass"),
+    }
+}
 
 pub struct TextRendering {
     pub text_renderer: TextRenderer,
@@ -32,7 +57,6 @@ pub struct TextRendering {
     // to duplicate there.
     pub text_renderer_on_top: TextRenderer,
     pub text_cache: SwashCache,
-    pub font_system: FontSystem,
     pub text_atlas: TextAtlas
 
 }
@@ -82,9 +106,9 @@ pub struct UiRendering {
 
 impl UiRendering {
     /// The mouse, in UI units - where the UI's hit-tests compare it.
-    pub(crate) fn mouse(&self) -> (f32, f32) {
+    pub(crate) fn mouse(&self, input: &crate::input::input::Input) -> (f32, f32) {
         let scale = self.ui_scale.max(0.0001);
-        (crate::input::input::mouse_x() as f32 / scale, crate::input::input::mouse_y() as f32 / scale)
+        (input.mouse_x() as f32 / scale, input.mouse_y() as f32 / scale)
     }
 }
 
@@ -193,14 +217,18 @@ pub struct ImageDraw {
 }
 
 
-/// # Ui 
-/// This is the struct defined to mainly create and render ui elements in the screen, contains:
-///     - **ui_rendering**: values to render our ui elements, like the vertex and index buffers and which material each run of quads is drawn with (Ui shaders - see engine::rendering::shader_library)
-///     - **renderizable elements**: a list of lists where we define what we will render, if we want to show a button it should be added to one of the lists inside of it
-///     - **text**: Usable data for text rendering, like font systems, text atrlas, and more... 
+/// # Ui - `app.ui`
+/// The system that lays out, draws and routes input for every `UiLayer` in
+/// the active scene (a game's UI is a node with that property - see
+/// `UiLayer`), plus the engine's own UI (toasts, a
+/// dropdown's open list), which it keeps itself. Holds:
+///     - **ui_rendering**: values to render the UI with, like the vertex and index buffers and which material each run of quads is drawn with (Ui shaders - see engine::rendering::shader_library)
+///     - **text**: what text is drawn with - the glyph atlas and renderers
+///     - the UI's global settings: `scaling`, `scale`, `debug_bounds`, `toasts`
 
 pub struct Ui {
-    pub renderizable_elements: HashMap<String, UiNode>,
+    /// The engine's own UI, by key - a game's is in its scene's `UiLayer`s.
+    pub(crate) renderizable_elements: HashMap<String, UiNode>,
     pub ui_rendering: UiRendering,
     pub text: TextRendering,
     pub has_changed: bool,
@@ -226,30 +254,14 @@ pub struct Ui {
     // node's resolved rect, recursively, so layout bugs (like a hover hit-test not
     // lining up with what's visually drawn) can be seen directly.
     pub debug_bounds: bool,
-    // Top-level renderizable_elements keys that must render after every other
-    // top-level node, in this order - e.g. a modal overlay (see
-    // main_menu::rebind_modal), which needs to visually sit above every other
-    // panel regardless of insertion order. Exists because renderizable_elements
-    // is a HashMap: iterating it gives *some* consistent order for a given run,
-    // but not one based on insertion or any other meaningful rule, so nothing
-    // can rely on "the thing I built last renders last" without this - see
-    // App::prepare_ui_content, the only reader.
-    pub always_on_top: Vec<String>,
-    // The mirror image of always_on_top - top-level keys that must render
-    // *before* every other top-level node (in this order), e.g. a persistent
-    // full-screen backdrop shared behind several panels that toggle active/
-    // inactive on top of it (see main_menu::ui's "Backdrop"). Without this,
-    // Backdrop's render order relative to those panels would be exactly as
-    // arbitrary as always_on_top's own doc comment describes - it could just as
-    // easily land on top and paint over their button backgrounds/hover
-    // highlights (text would still show through, being a separate always-last
-    // pass, which is what would make this particular failure mode easy to miss
-    // in a quick look but still very visibly wrong).
-    pub always_on_bottom: Vec<String>,
-    // Top-level keys drawn over everything, always_on_top included - like
-    // always_on_top, but they don't block input to the rest of the UI (a
-    // toast, see widgets::toast). Drawn in the always-on-top layer, after it.
-    pub overlay: Vec<String>,
+    // Engine UI keys drawn over every scene layer, in this order - a
+    // dropdown's open list. Like a modal, while one is
+    // up nothing under it takes input (see App::prepare_ui_content).
+    pub(crate) always_on_top: Vec<String>,
+    // Engine UI keys drawn over everything, always_on_top included - but
+    // they don't block input to the rest of the UI (a toast, see
+    // widgets::toast).
+    pub(crate) overlay: Vec<String>,
     /// The toasts showing now, and where they stack - see widgets::toast.
     pub toasts: Toasts,
     /// How the UI follows the window's size - see `UiScaling`.
@@ -293,8 +305,7 @@ impl Ui {
     }
 
     /// The room the UI lays out in, in UI units - the window's size divided
-    /// by `scale_factor`. What full-screen UI (a `Layer`, a modal) is sized
-    /// and placed against.
+    /// by `scale_factor`. What every `UiLayer` is sized and placed against.
     pub fn size(&self) -> (f32, f32) {
         self.size
     }
@@ -306,11 +317,10 @@ impl Ui {
         Size { width: width.round().max(1.0) as u32, height: height.round().max(1.0) as u32 }
     }
 
-    /// Lays every node out again in the UI's current room (see `size`) -
-    /// their Percent sizes and Center/End positions were worked out against
-    /// the old one (see UiNode::resolve). The engine does it after a resize
-    /// or a change of scale; a game can too, after changing nodes' layout.
-    pub fn relayout(&mut self) {
+    /// Lays the engine's own UI out again in the UI's current room (see
+    /// `size`) - after a resize or a change of scale. Scene layers notice the
+    /// new room on their own (see `UiLayer::lay_out`).
+    pub(crate) fn relayout(&mut self) {
         let (width, height) = self.size();
         for node in self.renderizable_elements.values_mut() {
             node.resolve(width, height);
@@ -395,15 +405,6 @@ impl Ui {
     /// otherwise (UiNode::set_material).
     #[allow(clippy::too_many_arguments)]
     pub fn new(device: &Device, queue: &Queue, config: &SurfaceConfiguration, cache: &Cache, blur: &BlurRender, box_layout: &BindGroupLayout) -> Self {
-        let mut font_system = FontSystem::new();
-        let font = include_bytes!("../../../assets/fonts/Inter-Thin.ttf");
-        font_system.db_mut().load_font_data(font.to_vec());
-        // Regular weight of the same family, for labels that ask for it by
-        // name (`Font { family: Some("Inter"), .. }`) - loading it doesn't
-        // change what the default sans-serif labels resolve to.
-        let font = include_bytes!("../../../assets/fonts/Inter-Regular.ttf");
-        font_system.db_mut().load_font_data(font.to_vec());
-
         let text_cache = SwashCache::new();
         let mut text_atlas = TextAtlas::new(&device, queue, cache, config.format);
         let text_renderer: TextRenderer = TextRenderer::new(
@@ -462,7 +463,6 @@ impl Ui {
                 text_renderer,
                 text_renderer_on_top,
                 text_cache,
-                font_system,
                 text_atlas
             },
             ui_rendering,
@@ -487,7 +487,6 @@ impl Ui {
             }),
             debug_bounds: false,
             always_on_top: Vec::new(),
-            always_on_bottom: Vec::new(),
             overlay: Vec::new(),
             toasts: Toasts::default(),
             scaling: UiScaling::default(),
@@ -526,44 +525,14 @@ impl Ui {
         self.blur_bind_group_on_top = Self::build_blur_bind_group(device, &self.blur_bind_group_layout, &blur.backdrop, blur, &self.screen_size_buffer);
     }
 
-    pub fn load_ui(&mut self, path: &str, screen_width: u32, screen_height: u32) {
-        let ui_structure = self.open_ui(path);
-        let sw = screen_width as f32;
-        let sh = screen_height as f32;
-
-        match ui_structure {
-            Some(ui_structure) => {
-                for (id, component) in &ui_structure.children {
-                    let node = UiNode::from_component(component, &mut self.text.font_system, sw, sh);
-                    self.renderizable_elements.insert(id.clone(), node);
-                }
-            },
-            None => {
-                println!("Failed to load UI from path: {}", path);
-            }
-        }
-    }
-
-    /// Every image path its nodes draw - for app.assets to load with the
-    /// scene (see App::open_scene).
+    /// Every image path the engine's own UI draws - for app.assets to keep
+    /// with the scene's (see `SceneManager::apply_open`).
     pub(crate) fn image_paths(&self) -> Vec<String> {
         let mut paths = Vec::new();
         for node in self.renderizable_elements.values() {
-            Self::collect_image_paths(node, &mut paths);
+            node.collect_image_paths(&mut paths);
         }
         paths
-    }
-
-    fn collect_image_paths(node: &UiNode, paths: &mut Vec<String>) {
-        match &node.content {
-            UiNodeContent::Image(image) => paths.push(image.path.clone()),
-            UiNodeContent::Container(container) => {
-                for (_, child) in &container.children {
-                    Self::collect_image_paths(child, paths);
-                }
-            }
-            UiNodeContent::Text(_) => {}
-        }
     }
 
     // Rebuilds this frame's batched image draw calls from UiRendering::image_quads -
@@ -604,54 +573,16 @@ impl Ui {
         queue.write_buffer(&self.image_index_buffer, 0, index_bytes);
     }
 
-    pub fn open_ui(&mut self, path: &str) -> Option<UiStructure> {
-        match std::fs::read_to_string(path) {
-            Ok(file_contents) => {
-                match from_str::<UiStructure>(&file_contents) {
-                    Ok(ui) => {
-                        // Here we start loading elements based on this to the hashmap components
-                        return Some(ui)
-                    },
-                    Err(e) => {
-                        // Handle the error if deserialization fails
-                        eprintln!("Error deserializing RON: {}", e);
-                    }
-                }
-            },
-            _ => {}
-        }
-        return None
-    }
-
-    pub fn add_to_ui(&mut self, id: String, element_to_add: UiNode) {
+    /// Adds a node to the engine's own UI under `id`.
+    pub(crate) fn add_to_ui(&mut self, id: String, element_to_add: UiNode) {
         self.renderizable_elements.insert(id, element_to_add);
     }
 
-    /// Get a UI node by path. Supports nested access with `/` separator.
-    /// e.g. `"data_box/framerate"` gets the child `framerate` from the container `data_box`.
-    pub fn get_ui_node<'a>(elements: &'a mut HashMap<String, UiNode>, path: &str) -> Option<&'a mut UiNode> {
-        let mut parts = path.splitn(2, '/');
-        let root_key = parts.next()?;
-        let node = elements.get_mut(root_key)?;
-        match parts.next() {
-            Some(rest) => Self::traverse_node(node, rest),
-            None => Some(node),
-        }
-    }
-
-    fn traverse_node<'a>(node: &'a mut UiNode, path: &str) -> Option<&'a mut UiNode> {
-        let mut parts = path.splitn(2, '/');
-        let key = parts.next()?;
-        let child = match &mut node.content {
-            UiNodeContent::Container(container) => container.children.iter_mut()
-                .find(|(id, _)| id == key)
-                .map(|(_, child)| child),
-            _ => None,
-        }?;
-        match parts.next() {
-            Some(rest) => Self::traverse_node(child, rest),
-            None => Some(child),
-        }
+    /// A node of the engine's own UI by path - "loading_panel/label" is the
+    /// child "label" of the node added as "loading_panel".
+    pub(crate) fn get_ui_node<'a>(elements: &'a mut HashMap<String, UiNode>, path: &str) -> Option<&'a mut UiNode> {
+        let (root_key, rest) = path.split_once('/').unwrap_or((path, ""));
+        elements.get_mut(root_key)?.find_mut(rest)
     }
 }
 

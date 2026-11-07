@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::env;
+use std::hash::{DefaultHasher, Hash, Hasher};
 
 use glyphon::TextArea;
 use nalgebra::Vector3;
@@ -7,25 +8,29 @@ use sdl2::EventPump;
 
 use crate::asset_manager::AssetManager;
 use crate::audio::audio::{Audio, Sound};
-use crate::game_nodes::timing::Timing;
-use crate::input::input;
+use crate::timing::Timing;
+use crate::input::input::Input;
 use crate::particles::Emitter;
 use crate::particles::renderer::{EmitterSource, ParticleFrameInfo, ParticleRenderer};
 use crate::physics::PhysicsWorld;
 use crate::rendering::egui_overlay::DebugUi;
 use crate::rendering::graphics_backend::GraphicsBackend;
 use crate::rendering::enviroment::environment::PreparedEnvironment;
-use crate::rendering::instance_management::InstanceRaw;
+use crate::rendering::instance_management::{InstanceRaw, ShadowRun};
+use crate::rendering::render_pipeline::shadow_renderer::hash_floats;
 use crate::rendering::renderer::Renderer;
 use crate::rendering::ui::ui::Ui;
-use crate::scene_manager::node::properties::{Light, LightKind, Shape2D, ShapeKind};
-use crate::rendering::shapes_2d::ShapeInstance;
-use crate::scene_manager::scene_access::SceneChanges;
-use crate::scene_manager::scene::{FrameContext, Scene, SceneManager};
+use crate::scene_manager::node::properties::{Light, LightKind, UiLayer};
+use crate::scene_manager::node::Node;
+use crate::scene_manager::scene_access::{SceneAccess, SceneChanges};
+use crate::scene_manager::manager::SceneManager;
+use crate::scene_manager::scene::{FrameContext, Scene};
 use crate::ui::color::UiColor;
-use crate::ui::ui_node::UiNode;
+use crate::ui::ui_node::{ClickHandler, UiNode};
 use crate::ui::ui_transform::PositionValue;
-use crate::window::window::Window;
+use crate::window::Window;
+use crate::world_origin::WorldOrigin;
+use crate::scene_manager::node::properties::OriginAnchor;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -47,7 +52,7 @@ pub struct Size {
         let mut app = App::new().await?;
         app.window.set_title("My Game");
         app.physics.set_gravity(Vector3::new(0.0, -9.81, 0.0));
-        input::load_bindings("settings/input.ron")?;
+        app.input.load_bindings("settings/input.ron")?;
         app.scene_manager.create_scene("level", Level::new);
         app.scene_manager.open_scene("level");
         app.run();
@@ -61,12 +66,16 @@ pub struct Size {
       every scene runs with (see PhysicsWorld).
     - particles: every node's particles and trails, and the wind and sea
       they move in (see ParticleRenderer).
+    - origin: the floating origin - where the open scene's (0, 0, 0) is in
+      the world, moved along to keep positions precise far out (see
+      WorldOrigin).
 
     Each system's settings are its own, and global: set once, they hold for
     every scene until they're set again. The sun is a node (see Light).
     - ui, audio, time (delta time, time scale), debug_ui (the game's egui
       debug windows).
-    - Input is global, not here - see crate::input::input.
+    - input: keys, mouse, controllers - and the game's bindings (see
+      Input: load_bindings, set_user_bindings_path).
 */
 pub struct App {
     pub window: Window,
@@ -77,11 +86,10 @@ pub struct App {
     pub audio: Audio,
     pub time: Timing,
     pub debug_ui: DebugUi,
-    pub loading_step: Option<String>,
     pub physics: PhysicsWorld,
-    /// GPU particles and trails, fed each frame from every node's
-    /// Emitter property (see App::update_particles).
+    pub input: Input,
     pub particles: ParticleRenderer,
+    pub origin: WorldOrigin,
     pub should_quit: bool,
     event_pump: Option<EventPump>,
 }
@@ -96,7 +104,7 @@ impl App {
         env::set_var("SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS", "0");
         let sdl = sdl2::init()?;
         let window = Window::new(sdl.video()?)?;
-        input::init(sdl.game_controller()?, sdl.joystick()?);
+        let input = Input::new(sdl.game_controller()?, sdl.joystick()?);
         let event_pump = sdl.event_pump()?;
 
         GraphicsBackend::available();
@@ -124,9 +132,10 @@ impl App {
             audio: Audio::new(),
             time: Timing::new(),
             debug_ui,
-            loading_step: None,
             physics: PhysicsWorld::new(),
+            input,
             particles,
+            origin: WorldOrigin::new(),
             should_quit: false,
             event_pump: Some(event_pump),
         })
@@ -162,9 +171,8 @@ impl App {
         if let Some(cameras) = self.scene_manager.cameras_mut() {
             cameras.resize(width, height);
         }
-        // A scene waiting for its assets has cameras too.
-        if let Some(pending) = self.scene_manager.loading.as_mut() {
-            pending.scene.cameras.resize(width, height);
+        for scene in self.scene_manager.waiting_scenes_mut() {
+            scene.cameras.resize(width, height);
         }
         self.ui.resize_blur_binding(&self.renderer.device, &self.renderer.queue, &self.renderer.blur, width, height);
 
@@ -179,16 +187,17 @@ impl App {
         &self.renderer.prepared_environment
     }
 
-    /// The active scene's sun: toward it (normalized), and the light it
-    /// gives - from its first node with a directional `Light` and a
-    /// `Transform3D`, which shines along the node's +Z. None: no sun.
-    fn sun(&self) -> Option<(Vector3<f32>, [f32; 3])> {
+    /// The active scene's sun: toward it (normalized), the light it gives,
+    /// and whether it casts shadows - from its first node with a directional
+    /// `Light` and a `Transform3D`, which shines along the node's +Z. None:
+    /// no sun.
+    fn sun(&self) -> Option<(Vector3<f32>, [f32; 3], bool)> {
         let content = self.scene_manager.content()?;
         content.nodes.iter().find_map(|node| {
             let light = node.get_property::<Light>().filter(|light| light.kind == LightKind::Directional)?;
             let transform = node.transform_3d()?;
             let toward = -(transform.rotation * Vector3::z());
-            Some((toward, light.radiance()))
+            Some((toward, light.radiance(), light.shadows))
         })
     }
 
@@ -196,7 +205,7 @@ impl App {
     /// assets are loading, which builds it with them - and fills the light
     /// buffer and the sky's sun disc from the active scene's sun.
     fn update_lighting(&mut self, camera_position: Vector3<f32>) {
-        if self.renderer.environment() != &self.renderer.prepared_from && self.scene_manager.loading.is_none() {
+        if self.renderer.environment() != &self.renderer.prepared_from && !self.scene_manager.is_switching() {
             let environment = self.renderer.environment().clone();
             self.renderer.prepared_environment = self.renderer.prepare_environment(environment.clone());
             self.renderer.prepared_from = environment;
@@ -209,12 +218,29 @@ impl App {
         // no sunlight, no disc - only the ambient light.
         const SUN_DISTANCE: f32 = 1.0e9;
         let sun = self.sun();
-        if let Some((toward, radiance)) = sun {
+        if let Some((toward, radiance, _)) = sun {
             let light_position = toward * SUN_DISTANCE;
             self.renderer.light.uniform.position = [light_position.x, light_position.y, light_position.z];
             self.renderer.light.uniform.color = radiance;
         } else {
             self.renderer.light.uniform.color = [0.0; 3];
+        }
+
+        // The sun's shadows - only with a camera to see them (the shadow map
+        // follows it). Without, the shaders treat everything as sunlit.
+        let has_camera = self.scene_manager.cameras().is_some_and(|cameras| cameras.has_active_camera());
+        let shadowing = sun.filter(|(_, _, shadows)| *shadows && has_camera && self.renderer.shadows().enabled);
+        self.renderer.shadows.active = shadowing.is_some();
+        if let Some((toward, _, _)) = shadowing {
+            let settings = self.renderer.shadows();
+            let fit = self.renderer.shadows.update(&self.renderer.queue, toward, camera_position, &settings);
+            let cascades = self.renderer.shadows.cascades.len() as f32;
+            let resolution = self.renderer.shadows.resolution() as f32;
+            self.renderer.light.uniform.shadow_view_proj = fit.view_proj;
+            self.renderer.light.uniform.shadow_texels = fit.texel;
+            self.renderer.light.uniform.shadow_params = [cascades, 1.0 / resolution, settings.softness, 0.0];
+        } else {
+            self.renderer.light.uniform.shadow_params[0] = 0.0;
         }
         self.renderer.light.uniform.ambient = self.renderer.ambient_light();
         self.renderer.light.uniform.time = self.time.shader_time();
@@ -222,7 +248,7 @@ impl App {
         self.renderer.queue.write_buffer(&self.renderer.light.rendering_data.buffer, 0, bytemuck::cast_slice(&[self.renderer.light.uniform]));
         let queue = self.renderer.queue.clone();
         if let Some(skybox) = self.renderer.prepared_environment.skybox.as_mut() {
-            skybox.set_sun(&queue, sun.map(|(toward, _)| toward));
+            skybox.set_sun(&queue, sun.map(|(toward, _, _)| toward));
         }
     }
 
@@ -246,6 +272,7 @@ impl App {
             sun_direction: Vector3::from(light.position),
             sun_color: Vector3::from(light.color),
             ambient: Vector3::from(light.ambient),
+            origin_y: self.origin.origin().y,
         };
 
         let Some(content) = self.scene_manager.content() else { return };
@@ -254,47 +281,11 @@ impl App {
             // Where the node is being drawn - its render instance if it has
             // one (moved by physics), otherwise its own Transform3D.
             let (position, rotation) = content.renderizable_instances.get(&node.id)
-                .map(|instance| (instance.instance.transform.position, instance.instance.transform.rotation))
+                .map(|instance| (instance.transform.position, instance.transform.rotation))
                 .or_else(|| node.transform_3d().map(|transform| (transform.position, transform.rotation)))?;
             Some(EmitterSource { node_id: &node.id, emitter, position, rotation })
         });
         self.particles.update(&self.renderer.device, &self.renderer.queue, &frame, sources);
-    }
-
-    /// Hands the 2D nodes' shapes (see `Shape2D`) to the renderer, in the
-    /// order they're drawn: by z index (the shape's own, or its node's),
-    /// then by when each was put on - the later in front. Their units are
-    /// the UI's (see `Transform2D`), so they're turned into pixels the way
-    /// the UI's are.
-    fn prepare_nodes_2d(&mut self) {
-        let mut shapes: Vec<((i32, u64), ShapeInstance)> = Vec::new();
-        if let Some(content) = self.scene_manager.content() {
-            let pixels_per_unit = self.window.pixel_size.width as f32 / self.ui.layout_size().width as f32;
-            for node in content.nodes.iter() {
-                let (Some(transform), Some(shape)) = (node.transform_2d(), node.get_property::<Shape2D>()) else { continue };
-                let (center, rotation) = shape.offset.place(transform);
-                let (half_size, kind) = match shape.kind {
-                    ShapeKind::Rect { width, height } => ([width / 2.0 * transform.scale.x, height / 2.0 * transform.scale.y], ShapeInstance::RECT),
-                    ShapeKind::Circle { radius } => {
-                        let radius = radius * transform.scale.x.max(transform.scale.y);
-                        ([radius, radius], ShapeInstance::CIRCLE)
-                    }
-                };
-                let (sin, cos) = rotation.sin_cos();
-                let order = (shape.z_index.unwrap_or(transform.z_index), node.property_order::<Shape2D>().unwrap_or(0));
-                shapes.push((order, ShapeInstance {
-                    center: [center.x * pixels_per_unit, center.y * pixels_per_unit],
-                    half_size: half_size.map(|half| half * pixels_per_unit),
-                    rotation: [cos, sin],
-                    kind: [kind, 0.0],
-                    color: shape.color.to_rgba_f32(),
-                }));
-            }
-        }
-        shapes.sort_by_key(|(order, _)| *order);
-        let shapes: Vec<ShapeInstance> = shapes.into_iter().map(|(_, shape)| shape).collect();
-        let screen_px = (self.renderer.config.width, self.renderer.config.height);
-        self.renderer.shapes_2d.set(&self.renderer.device, &self.renderer.queue, &shapes, screen_px);
     }
 
     /// Plays the sound file `path` (inside the assets folder) - read the
@@ -330,7 +321,7 @@ impl App {
         let ui_height = self.ui.size().1;
         crate::ui::widgets::toast::update_toasts(&mut self.ui, self.time.unscaled_delta_time, ui_height);
         self.prepare_ui_content();
-        self.prepare_nodes_2d();
+        self.prepare_node_visuals();
         self.apply_cursor();
         self.fire_ui_click_handlers();
 
@@ -367,13 +358,9 @@ impl App {
     // half, the actual visible text, via the ordinary UI pass, which runs
     // unconditionally on top regardless of what the 3D passes did.
     fn sync_no_camera_message(&mut self) {
-        // Suppressed while: a real camera exists; a heavy scene's background
-        // load hasn't finished yet (LoadingScreenScene is legitimately
-        // camera-less the whole time); or no scene
-        // has ever been constructed yet at all (the very first frame, before
-        // the first scene opens) - same "nothing to blame a scene for"
-        // reasoning as the loading case.
-        if self.scene_manager.cameras().is_some_and(|c| c.has_active_camera()) || self.scene_manager.loading.is_some() || self.scene_manager.active_scene.is_none() {
+        // Suppressed while: a real camera exists; a scene is being opened;
+        // or no scene has opened yet at all.
+        if self.scene_manager.cameras().is_some_and(|c| c.has_active_camera()) || self.scene_manager.is_switching() || self.scene_manager.active_scene.is_none() {
             if self.ui.renderizable_elements.remove(Self::NO_CAMERA_MESSAGE_KEY).is_some() {
                 self.ui.has_changed = true;
             }
@@ -385,7 +372,7 @@ impl App {
         }
 
         let (screen_width, screen_height) = self.ui.size();
-        let mut label = UiNode::label(&mut self.ui.text.font_system, "Add a camera to the scene", Some(500.0), Some(40.0))
+        let mut label = UiNode::label("Add a camera to the scene", Some(500.0), Some(40.0))
             .set_position(PositionValue::Center(0.0), PositionValue::Center(0.0))
             .set_text_color(UiColor::Rgb(255, 255, 255))
             // set_position alone only centers the label's own box on screen -
@@ -398,51 +385,44 @@ impl App {
         self.ui.has_changed = true;
     }
 
-    // Rebuilds UI vertex/index/text buffers from the current node tree - every
-    // frame while there's any UI: this pass is also where hover, press, clicks,
+    // Rebuilds UI vertex/index/text buffers from this frame's UI - every frame
+    // while there's any: this pass is also where hover, press, clicks,
     // scrolling and style transitions are worked out, so it has to run for
-    // them to respond. With no UI, only when something marked it changed (the
+    // them to respond. With none, only when something marked it changed (the
     // last node removed, say) - then it's cleared once and skipped after.
+    //
+    // What's drawn, bottom to top: the engine's own UI (the "add a camera"
+    // message), the active scene's `UiLayer`s by z index, the engine's
+    // always_on_top UI (a dropdown's open list), then its
+    // overlay (toasts). Something that blocks input - a layer with
+    // `blocks_input`, or any active always_on_top node - keeps hover and
+    // clicks from everything under it. Text is drawn after the boxes of its
+    // pass, so there are two passes: everything from the lowest blocking
+    // layer up goes in the second, so a modal's box covers the text under it.
     fn prepare_ui_content(&mut self) {
-        if !self.ui.has_changed && self.ui.renderizable_elements.is_empty() {
+        let has_layers = self.scene_manager.active_scene.as_ref().is_some_and(|scene| !scene_layer_order(scene).is_empty());
+        if !self.ui.has_changed && self.ui.renderizable_elements.is_empty() && !has_layers {
             self.ui.ui_rendering.hover_cursor = None;
             return;
         }
 
         // Two separate batches (see TextRendering::text_renderer_on_top's own doc
-        // comment for why one shared Vec/one glyphon TextRenderer can't do this) -
-        // main pass's text, and always_on_top nodes' text, prepared+rendered as
-        // two independent draw calls so the latter actually lands above the
-        // former instead of every node's text piling into one shared final pass.
+        // comment for why one shared Vec/one glyphon TextRenderer can't do this).
         let mut text_areas: Vec<TextArea> = Vec::new();
         let mut text_areas_on_top: Vec<TextArea> = Vec::new();
 
         self.ui.ui_rendering.clear();
 
-        // Taken out up front (rather than looked up in render order via repeated
-        // get_mut calls) because this function's TextAreas borrow from inside
-        // renderizable_elements for its own entire remaining duration (see the
-        // comment near the bottom) - a second borrow of the map partway through
-        // (which get_mut would be) conflicts with that. Same two-pass take/
-        // restore shape App::fire_ui_click_handlers uses, for the same
-        // underlying reason (something here needs to outlive a single map
-        // borrow) - restored right before the map is touched again, after
-        // text_areas has been fully consumed.
+        // Taken out up front: this function's TextAreas borrow from inside
+        // the nodes for its whole remaining duration, so the map can't be
+        // borrowed again for them partway through. Put back once text_areas
+        // has been consumed.
         let mut on_top_nodes: Vec<(String, UiNode)> = Vec::new();
         for key in &self.ui.always_on_top {
             if let Some(node) = self.ui.renderizable_elements.remove(key) {
                 on_top_nodes.push((key.clone(), node));
             }
         }
-        // Same take-out, for the opposite end - see Ui::always_on_bottom's own
-        // doc comment.
-        let mut on_bottom_nodes: Vec<(String, UiNode)> = Vec::new();
-        for key in &self.ui.always_on_bottom {
-            if let Some(node) = self.ui.renderizable_elements.remove(key) {
-                on_bottom_nodes.push((key.clone(), node));
-            }
-        }
-        // And Ui::overlay's (toasts) - drawn after the on-top ones.
         let mut overlay_nodes: Vec<(String, UiNode)> = Vec::new();
         for key in &self.ui.overlay {
             if let Some(node) = self.ui.renderizable_elements.remove(key) {
@@ -450,75 +430,94 @@ impl App {
             }
         }
 
-        // An active always_on_top node (a modal, currently) should block input to
-        // literally everything else while it's up, the same way a real dialog
-        // does - otherwise it's only visually on top (see Ui::always_on_top's own
-        // doc comment for the rendering half of this), and clicks still fall
-        // through to whatever button happens to sit at the same screen position
-        // underneath. Among the always_on_top nodes themselves, the same goes
-        // for each over the ones before it: only the last active one takes
-        // input - a dropdown's open list (see widgets::dropdown) over the modal
-        // it was opened from blocks that modal, until it closes.
-        let blocks_input = on_top_nodes.iter().any(|(_, n)| n.is_active);
-
         // UI units -> real backing pixels: the display's own (see
         // Window::pixel_size's own doc comment) times the UI's scale (see
         // UiScaling) - node_content_preparation needs this to place glyphon
-        // TextAreas and draw every box, since those work in real pixels
-        // regardless of what space everything else here (UiTransform, mouse
-        // position) is in. See Label::text_area's own doc comment. Worked out
-        // from the same rounded room the layout uses, so the two always agree.
+        // TextAreas and draw every box. Worked out from the same rounded room
+        // the layout uses, so the two always agree.
         let ui_size = self.ui.layout_size();
         let dpi_scale = self.window.pixel_size.width as f32 / ui_size.width as f32;
+        let (room_width, room_height) = self.ui.size();
 
-        // Debug bounds overlay (Ui::debug_bounds, no key) - has to run before node_content_preparation
-        // below, not after: that call's returned TextAreas keep *ui_node mutably
-        // borrowed for as long as they're alive (all the way to text_areas being
-        // consumed further down), so nothing else can borrow *ui_node again
-        // afterward. Reading the rect from the start of this frame (one frame
-        // stale for a node whose layout is still actively changing) instead of
-        // after this frame's update is an invisible tradeoff for a debug-only
-        // overlay. Shared by both loops below rather than a closure, since a
-        // closure capturing &mut self.ui.ui_rendering would itself conflict with
-        // the &mut self.ui.renderizable_elements/on_top_nodes iteration around it.
+        // The scene's layers, bottom to top (the same order as
+        // scene_layer_order), each laid out in the window's room - again
+        // whenever that changes.
+        let mut layers: Vec<(String, &mut UiLayer)> = match self.scene_manager.active_scene.as_mut() {
+            Some(scene) => scene.content.nodes.iter_mut()
+                .filter_map(|node| {
+                    let id = node.id.clone();
+                    node.get_property_mut::<UiLayer>().filter(|layer| layer.visible).map(|layer| (id, layer))
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        layers.sort_by(|(a_id, a), (b_id, b)| a.z_index.cmp(&b.z_index).then_with(|| a_id.cmp(b_id)));
+        for (_, layer) in &mut layers {
+            layer.lay_out(room_width, room_height);
+        }
+
+        // Each thing drawn has an index, bottom to top: the engine's own UI,
+        // then the layers, then always_on_top, then the overlay.
+        let layers_start = self.ui.renderizable_elements.len();
+        let on_top_start = layers_start + layers.len();
+        // The topmost thing that blocks input - nothing under it takes any.
+        let topmost_blocking = on_top_nodes.iter().rposition(|(_, node)| node.is_active).map(|index| on_top_start + index)
+            .or_else(|| layers.iter().rposition(|(_, layer)| layer.blocks_input).map(|index| layers_start + index));
+        let hit_testable = |index: usize| topmost_blocking.map_or(true, |topmost| index >= topmost);
+        // Where the second pass starts - the lowest blocking layer, or the
+        // engine's always_on_top UI.
+        let second_pass_start = layers.iter().position(|(_, layer)| layer.blocks_input).map_or(on_top_start, |index| layers_start + index);
+
+        // The engine's one font system, held for the whole pass (and handed
+        // down) - text shaped in here can't take it again.
+        let mut fonts = crate::rendering::ui::ui::font_system();
+        let delta_time = self.time.unscaled_delta_time;
+
+        // Debug bounds overlay (Ui::debug_bounds, no key) - has to run before
+        // node_content_preparation, not after: that call's returned TextAreas
+        // keep the node borrowed until text_areas is consumed. Reads the rect
+        // from the start of this frame - an invisible tradeoff for a debug
+        // overlay. A macro rather than a closure, since a closure capturing
+        // &mut self.ui.ui_rendering would conflict with the borrows of the
+        // nodes around it.
+        let mut index = 0usize;
+        let mut first_pass_closed = false;
         macro_rules! prepare_node {
-            ($ui_node:expr, $hit_testable:expr, $text_areas:expr) => {
+            ($ui_node:expr) => {
+                // Everything up to here is the first pass - see UiRendering::
+                // main_index_count's own doc comment.
+                if !first_pass_closed && index >= second_pass_start {
+                    self.ui.ui_rendering.main_index_count = self.ui.ui_rendering.num_indices;
+                    self.ui.ui_rendering.main_uses_blur = std::mem::take(&mut self.ui.ui_rendering.uses_blur);
+                    first_pass_closed = true;
+                }
                 if self.ui.debug_bounds {
                     $ui_node.debug_bounds_preparation(&ui_size, dpi_scale, &mut self.ui.ui_rendering);
                 }
                 $ui_node.measure_fit();
-                // None - top-level nodes start unclipped; a scrollable
-                // container establishes its own clip for its descendants
-                // further down the recursion (see node_content_preparation's
-                // Container branch/clip_rect's own doc comment).
-                let (textareas_to_merge, _vertices_to_add, _indices_to_add) = $ui_node.node_content_preparation(&ui_size, dpi_scale, &mut self.ui.ui_rendering, &mut self.ui.text.font_system, &mut self.ui.text.text_cache, self.time.unscaled_delta_time, $hit_testable, None, None, false);
-                $text_areas.extend(textareas_to_merge);
+                // None - a tree's root starts unclipped; a scrollable
+                // container clips its own descendants.
+                let (areas, _vertices, _indices) = $ui_node.node_content_preparation(&ui_size, dpi_scale, &mut self.ui.ui_rendering, &self.input, &mut fonts, &mut self.ui.text.text_cache, delta_time, hit_testable(index), None, None, false);
+                if first_pass_closed { text_areas_on_top.extend(areas) } else { text_areas.extend(areas) }
+                index += 1;
             };
         }
 
-        // always_on_bottom nodes first (see their own doc comment) - still subject
-        // to the same input-blocking as the regular pool below, not the always-
-        // hit-testable treatment on_top_nodes gets, since they're conceptually
-        // part of the same "everything except the modal" layer, just ordered to
-        // render first/behind within it.
-        for (_key, ui_node) in &mut on_bottom_nodes {
-            prepare_node!(ui_node, !blocks_input, text_areas);
-        }
         for (_key, ui_node) in &mut self.ui.renderizable_elements {
-            prepare_node!(ui_node, !blocks_input, text_areas);
+            prepare_node!(ui_node);
         }
-        // Everything up to here is the main pass - see UiRendering::
-        // main_index_count's own doc comment for why this boundary is recorded,
-        // not just the two loops' existence.
-        self.ui.ui_rendering.main_index_count = self.ui.ui_rendering.num_indices;
-        self.ui.ui_rendering.main_uses_blur = std::mem::take(&mut self.ui.ui_rendering.uses_blur);
-        let topmost_active = on_top_nodes.iter().rposition(|(_, node)| node.is_active);
-        for (index, (_key, ui_node)) in on_top_nodes.iter_mut().enumerate() {
-            let hit_testable = topmost_active.map_or(true, |topmost| index >= topmost);
-            prepare_node!(ui_node, hit_testable, text_areas_on_top);
+        for (_id, layer) in &mut layers {
+            prepare_node!(layer.root);
+        }
+        for (_key, ui_node) in &mut on_top_nodes {
+            prepare_node!(ui_node);
         }
         for (_key, ui_node) in &mut overlay_nodes {
-            prepare_node!(ui_node, true, text_areas_on_top);
+            prepare_node!(ui_node);
+        }
+        if !first_pass_closed {
+            self.ui.ui_rendering.main_index_count = self.ui.ui_rendering.num_indices;
+            self.ui.ui_rendering.main_uses_blur = std::mem::take(&mut self.ui.ui_rendering.uses_blur);
         }
 
         // Only update buffers if we have data
@@ -532,24 +531,16 @@ impl App {
         }
 
         // Always prepare, even with zero text areas - glyphon's prepare() is what
-        // clears its *previous* batch (it's cheap/safe to call empty: it just
-        // clears and returns, see glyphon::TextRenderer::render's own early-out
-        // for an empty batch). Skipping this call when there's currently nothing
-        // to show - e.g. the frame a modal closes, going from "had text" to
-        // "none" - left whatever was prepared last frame sitting in the
-        // renderer's buffer with nothing ever clearing it, so render() (called
-        // unconditionally every frame) kept drawing stale text that should've
-        // disappeared.
-        self.ui.text.text_renderer.prepare(&self.renderer.device, &self.renderer.queue, &mut self.ui.text.font_system, &mut self.ui.text.text_atlas, &self.renderer.glyphon.viewport, text_areas, &mut self.ui.text.text_cache).unwrap();
-        self.ui.text.text_renderer_on_top.prepare(&self.renderer.device, &self.renderer.queue, &mut self.ui.text.font_system, &mut self.ui.text.text_atlas, &self.renderer.glyphon.viewport, text_areas_on_top, &mut self.ui.text.text_cache).unwrap();
+        // clears its *previous* batch, so skipping it with nothing to show (the
+        // frame a modal closes) would keep drawing stale text.
+        self.ui.text.text_renderer.prepare(&self.renderer.device, &self.renderer.queue, &mut fonts, &mut self.ui.text.text_atlas, &self.renderer.glyphon.viewport, text_areas, &mut self.ui.text.text_cache).unwrap();
+        self.ui.text.text_renderer_on_top.prepare(&self.renderer.device, &self.renderer.queue, &mut fonts, &mut self.ui.text.text_atlas, &self.renderer.glyphon.viewport, text_areas_on_top, &mut self.ui.text.text_cache).unwrap();
+        drop(fonts);
 
-        // Puts always_on_top/always_on_bottom nodes back now that text_areas (the
-        // last thing that held any borrow into them) is fully consumed - see
-        // where they were taken out, above.
+        // Puts the engine's always_on_top and overlay nodes back now that
+        // text_areas (the last thing that held any borrow into them) is
+        // fully consumed - see where they were taken out, above.
         for (key, node) in on_top_nodes {
-            self.ui.renderizable_elements.insert(key, node);
-        }
-        for (key, node) in on_bottom_nodes {
             self.ui.renderizable_elements.insert(key, node);
         }
         for (key, node) in overlay_nodes {
@@ -557,16 +548,12 @@ impl App {
         }
 
         // An image that turned up while the scene runs loads now. Not while
-        // a scene loads - its images are on the loading thread, and its UI is
-        // under the loading screen.
-        if self.scene_manager.loading.is_none() {
+        // a scene loads - its images are on the loading thread.
+        if !self.scene_manager.is_switching() {
             let paths = self.ui.ui_rendering.image_quads.keys().map(|(_, path)| path.as_str());
             self.assets.images.load_missing(&self.renderer.device, &self.renderer.queue, paths);
         }
 
-        // Rebuilt last: glyphon's TextArea values above still borrow from inside
-        // renderizable_elements (each label's Buffer), so nothing else can take a
-        // &mut of self.ui until text_areas is fully consumed.
         self.ui.build_image_draws(&self.renderer.device, &self.renderer.queue);
 
         self.ui.has_changed = false;
@@ -587,20 +574,19 @@ impl App {
         self.window.set_cursor_icon(icon);
     }
 
-    // Runs every node's .on_click(...) callback that was clicked this frame (see
-    // UiNode::is_clicked, set in node_content_preparation above). Two passes: first
-    // just walk the tree collecting (and removing, see Option::take) each clicked
-    // node's on_click closure paired with its path - a plain &mut borrow of
-    // self.ui.renderizable_elements, no &mut App needed yet. Only then, with that
-    // borrow fully released, call each closure with &mut self - since
-    // renderizable_elements was never emptied or taken out of self.ui (unlike an
-    // earlier version of this that did exactly that), a handler can freely look up
-    // and mutate ANY UI node via Ui::get_ui_node while it runs, including its own
-    // node or an ancestor (e.g. a button hiding the panel it's inside of).
+    // Runs the `.on_click(...)` of the node clicked this frame (see
+    // UiNode::clicked_paths, from the drawing pass above) - only the one drawn
+    // on top, when a click lands on several (a dropdown's list over the row
+    // under it). Then the `on_select` of a dropdown whose list was picked from.
+    //
+    // A handler in a scene layer runs like a behavior: its node is taken out
+    // of the scene while it runs, and handed to it with the rest of the scene
+    // (`SceneAccess`) and the app - what it spawns or despawns is done right
+    // after. One in the engine's own UI only gets the app.
     fn fire_ui_click_handlers(&mut self) {
         // A node is only clicked the frame the left button goes down (see
         // UiNode::is_clicked) - every other frame there's nothing to look for.
-        if !input::mouse_left_button_just_pressed() {
+        if !self.input.mouse_left_button_just_pressed() {
             return;
         }
         // A debug window sits on top of the game's own UI. A click on it must
@@ -608,43 +594,116 @@ impl App {
         if self.debug_windows_shown() && self.debug_ui.ctx.is_pointer_over_area() {
             return;
         }
-        // Walked in the order they're drawn (see prepare_ui_content):
-        // always_on_bottom, the rest, always_on_top, overlay - the map itself
-        // has no order, and a node drawn under another must not take a click
-        // meant for the one over it (a dropdown's box under its open list).
-        let ui = &self.ui;
-        let layered = |key: &String| ui.always_on_bottom.contains(key) || ui.always_on_top.contains(key) || ui.overlay.contains(key);
-        let mut order: Vec<String> = ui.always_on_bottom.clone();
-        order.extend(ui.renderizable_elements.keys().filter(|key| !layered(key)).cloned());
-        order.extend(ui.always_on_top.iter().cloned());
-        order.extend(ui.overlay.iter().cloned());
+        // A frozen scene (another one is being opened) doesn't react.
+        if self.scene_manager.is_switching() {
+            return;
+        }
 
-        let mut pending: Vec<(String, Box<dyn FnMut(&mut App)>)> = Vec::new();
-        for id in &order {
-            if let Some(node) = self.ui.renderizable_elements.get_mut(id) {
-                node.take_click_handlers(id, &mut pending);
+        // Everything clicked, in the order it's drawn (see prepare_ui_content).
+        enum Clicked {
+            Engine(String),
+            Layer { node: String, path: String },
+        }
+        let mut clicked: Vec<Clicked> = Vec::new();
+        let mut paths = Vec::new();
+        let ui = &self.ui;
+        let layered = |key: &String| ui.always_on_top.contains(key) || ui.overlay.contains(key);
+        for (key, node) in ui.renderizable_elements.iter().filter(|(key, _)| !layered(key)) {
+            node.clicked_paths(key, &mut paths);
+            clicked.extend(paths.drain(..).map(Clicked::Engine));
+        }
+        if let Some(scene) = self.scene_manager.active_scene.as_ref() {
+            for id in scene_layer_order(scene) {
+                if let Some(layer) = scene.content.nodes.get(&id).and_then(|node| node.get_property::<UiLayer>()) {
+                    layer.root.clicked_paths("", &mut paths);
+                    clicked.extend(paths.drain(..).map(|path| Clicked::Layer { node: id.clone(), path }));
+                }
             }
         }
-        // A click can land on several overlapping nodes (a dropdown drawn over
-        // the row under it, and that row). The walk is in drawing order, and
-        // parent-then-children within each node, so the last one is the one
-        // painted on top. Only that one runs; the rest still get their
-        // closures put back.
-        let topmost = pending.len().saturating_sub(1);
-        for (index, (path, mut on_click)) in pending.into_iter().enumerate() {
-            if index == topmost {
-                on_click(self);
-            }
-            if let Some(node) = Ui::get_ui_node(&mut self.ui.renderizable_elements, &path) {
-                node.restore_click_handler(on_click);
+        for key in ui.always_on_top.iter().chain(&ui.overlay) {
+            if let Some(node) = ui.renderizable_elements.get(key) {
+                node.clicked_paths(key, &mut paths);
+                clicked.extend(paths.drain(..).map(Clicked::Engine));
             }
         }
+
+        match clicked.pop() {
+            Some(Clicked::Engine(path)) => {
+                if let Some(handler) = Ui::get_ui_node(&mut self.ui.renderizable_elements, &path).and_then(|node| node.take_click_handler()) {
+                    // A game's handler has no node to be given in the
+                    // engine's own UI - only the engine's own run there.
+                    let handler = match handler {
+                        ClickHandler::Engine(mut on_click) => {
+                            on_click(self);
+                            ClickHandler::Engine(on_click)
+                        }
+                        game => game,
+                    };
+                    if let Some(node) = Ui::get_ui_node(&mut self.ui.renderizable_elements, &path) {
+                        node.restore_click_handler(handler);
+                    }
+                }
+            }
+            Some(Clicked::Layer { node, path }) => {
+                self.with_layer_node(&node, |node, scene, app| {
+                    let Some(handler) = layer_node(node, &path).and_then(|ui_node| ui_node.take_click_handler()) else { return };
+                    let handler = match handler {
+                        ClickHandler::Engine(mut on_click) => {
+                            on_click(app);
+                            ClickHandler::Engine(on_click)
+                        }
+                        ClickHandler::Node(mut on_click) => {
+                            on_click(node, scene, app);
+                            ClickHandler::Node(on_click)
+                        }
+                    };
+                    if let Some(ui_node) = layer_node(node, &path) {
+                        ui_node.restore_click_handler(handler);
+                    }
+                });
+            }
+            None => {}
+        }
+
+        // An option picked from a dropdown's list (the engine's own UI, just
+        // clicked) - its dropdown's on_select, from its layer.
+        let mut picked = Vec::new();
+        if let Some(scene) = self.scene_manager.active_scene.as_ref() {
+            for id in scene_layer_order(scene) {
+                let mut found = Vec::new();
+                if let Some(layer) = scene.content.nodes.get(&id).and_then(|node| node.get_property::<UiLayer>()) {
+                    layer.root.picked_dropdowns("", &mut found);
+                }
+                picked.extend(found.into_iter().map(|(_, index, on_select)| (id.clone(), index, on_select)));
+            }
+        }
+        for (id, index, on_select) in picked {
+            self.with_layer_node(&id, |node, scene, app| {
+                // Taken out while it runs, so it can set a new one.
+                let Some(mut on_select_fn) = on_select.borrow_mut().take() else { return };
+                on_select_fn(node, scene, app, index);
+                on_select.borrow_mut().get_or_insert(on_select_fn);
+            });
+        }
+    }
+
+    /// Runs `run` with the active scene's node `id` - taken out of the scene
+    /// while it runs, like a behavior's node (see `SceneAccess`) - then does
+    /// what it spawned and despawned.
+    fn with_layer_node(&mut self, id: &str, run: impl FnOnce(&mut Node, &mut SceneAccess, &mut App)) {
+        let Some(mut scene) = self.scene_manager.active_scene.take() else { return };
+        let mut changes = SceneChanges::default();
+        if let Some(mut node) = scene.content.nodes.remove(id) {
+            run(&mut node, &mut SceneAccess::new(&mut scene.content.nodes, &mut scene.cameras, &mut changes), self);
+            scene.content.nodes.put_back(node);
+        }
+        scene.apply_changes(self, changes);
+        self.scene_manager.active_scene = Some(scene);
     }
 
     /// Shows the window and runs the game until it's closed (or
     /// `should_quit` is set). `scene_manager` is set up by the caller before
-    /// this - registering a scene and opening it only take effect here, after
-    /// the splash scene (if any - see `SceneManager::set_splash_scene`).
+    /// this - registering a scene and opening it only take effect here.
     pub fn run(mut self) {
         let mut app_state = AppState { is_running: true };
         let mut event_pump = self.event_pump.take().expect("run consumes the App, so the event pump is still here");
@@ -653,13 +712,11 @@ impl App {
         // Whatever was set on the window before run, the renderer follows.
         self.sync_window_size();
 
-        self.scene_manager.begin_splash();
-
         loop {
             self.time.update();
             // true if the OS/window manager requested a close (SDL2's own
             // Event::Quit - clicking the window's close button, Cmd+Q, etc.)
-            let quit_requested = input::update(&mut event_pump, self.time.unscaled_delta_time, false);
+            let quit_requested = self.input.update(&mut event_pump, self.time.unscaled_delta_time, false);
             if quit_requested {
                 app_state.is_running = false;
             }
@@ -670,10 +727,10 @@ impl App {
                 break
             }
 
-            if self.scene_manager.reset {
+            if self.scene_manager.requested.is_some() {
                 SceneManager::apply_open(&mut self);
             } else {
-                SceneManager::poll_load(&mut self);
+                SceneManager::update_loads(&mut self);
 
                 // The UI bounds overlay (no key - set Ui::debug_bounds) -
                 // rebuilt every frame while it's on, since it has to track
@@ -687,7 +744,14 @@ impl App {
                 // Its nodes tick right alongside it, in the same taken-out window:
                 // the physics steps due (each after every fixed_update), then
                 // every update.
-                if let Some(mut scene) = self.scene_manager.active_scene.take() {
+                // While another scene is being opened, the active one is
+                // frozen: still drawn, not updated.
+                let ticked = if self.scene_manager.is_switching() { None } else { self.scene_manager.active_scene.take() };
+                if let Some(mut scene) = ticked {
+                    // The floating origin first, so the whole frame sees
+                    // the world in the same place.
+                    self.origin.begin_frame();
+                    self.update_origin(&mut scene, true);
                     self.run_physics(&mut scene);
 
                     let mut ctx = FrameContext {
@@ -700,6 +764,10 @@ impl App {
                     scene.content.nodes.update(&mut scene.cameras, &mut self, &mut changes);
                     // What the behaviors spawned and despawned, now they've all run.
                     scene.apply_changes(&mut self, changes);
+                    // Teleports they asked for, before anything's drawn.
+                    if self.origin.has_pending() {
+                        self.update_origin(&mut scene, false);
+                    }
                     // Every moving body's colliders, for the debug view - after
                     // the behaviors, which may have moved one.
                     self.physics.draw_colliders();
@@ -710,7 +778,7 @@ impl App {
                     // camera node's camera.
                     scene.run_late_update(&mut self, &mut ctx);
                     scene.content.nodes.resolve_hierarchy();
-                    scene.sync_render_instances();
+                    scene.sync_render_instances(&mut self);
                     scene.sync_cameras();
 
                     // Re-aims every look_at-configured camera at its current
@@ -729,8 +797,6 @@ impl App {
                     callback(&mut self);
                 }
 
-                SceneManager::advance_load(&mut self);
-                self.scene_manager.advance_splash(self.time.unscaled_delta_time);
 
                 let camera_position = self.scene_manager.cameras().map(|c| c.active().camera.position().coords).unwrap_or_else(Vector3::zeros);
                 self.write_instance_buffers(camera_position);
@@ -778,15 +844,69 @@ impl App {
     /// every node's `fixed_update` (and the scene's), what they spawned and
     /// despawned done in between - then every moving body's node placed
     /// where it's drawn this frame (see `PhysicsWorld::render_poses`).
+    /// The floating origin's turn (see WorldOrigin): the teleports asked
+    /// for, each moving the origin to where its node goes first - then, at
+    /// the start of a frame (`check_anchor`), whether what the origin follows
+    /// is far enough out to move the world back.
+    fn update_origin(&mut self, scene: &mut Scene, check_anchor: bool) {
+        for teleport in self.origin.take_pending() {
+            if let Some(shift) = self.origin.shift_to(teleport.world) {
+                self.shift_origin(scene, shift);
+            }
+            let position = self.origin.to_local(teleport.world);
+            let Some(mut world) = scene.world_transform(&teleport.node) else {
+                eprintln!("origin: no node '{}' to teleport", teleport.node);
+                continue;
+            };
+            world.position = position;
+            if let Some(rotation) = teleport.rotation {
+                world.rotation = rotation;
+            }
+            scene.set_world_transform(&teleport.node, world);
+            self.physics.teleport(&teleport.node, world.position, world.rotation);
+        }
+        if check_anchor {
+            if let Some(shift) = Self::origin_anchor(scene).and_then(|anchor| self.origin.shift_for(anchor)) {
+                self.shift_origin(scene, shift);
+            }
+        }
+    }
+
+    /// Where what the floating origin follows is: the node with an
+    /// `OriginAnchor`, or the active camera.
+    fn origin_anchor(scene: &Scene) -> Option<Vector3<f32>> {
+        scene.content.nodes.iter()
+            .find(|node| node.get_property::<OriginAnchor>().is_some())
+            .and_then(|node| node.transform_3d())
+            .map(|transform| transform.position)
+            .or_else(|| scene.cameras.has_active_camera().then(|| scene.cameras.active().camera.position().coords))
+    }
+
+    /// Moves the whole world by `shift` - the scene's nodes and cameras, the
+    /// physics, particles and world-space line and text sets - notes it on
+    /// `origin`, then tells the behaviors (`on_origin_shift`).
+    fn shift_origin(&mut self, scene: &mut Scene, shift: Vector3<f32>) {
+        scene.shift_origin(shift);
+        self.physics.shift_origin(shift);
+        self.particles.shift_origin(shift);
+        self.renderer.render_sets.shift_origin(&self.renderer.device, shift);
+        self.origin.record_shift(shift);
+        scene.run_origin_shift(self, shift);
+    }
+
     fn run_physics(&mut self, scene: &mut Scene) {
         let steps = self.physics.steps_due(self.time.delta_time, self.renderer.debug.physics);
         for _ in 0..steps {
-            input::begin_fixed_step();
+            self.input.begin_fixed_step();
             let mut changes = SceneChanges::default();
             scene.content.nodes.fixed_update(&mut scene.cameras, self, &mut changes);
             scene.run_fixed_update(self);
             scene.apply_changes(self, changes);
-            input::end_fixed_step();
+            self.input.end_fixed_step();
+            // Teleports the fixed updates asked for, before the step moves anything.
+            if self.origin.has_pending() {
+                self.update_origin(scene, false);
+            }
             self.physics.step();
         }
 
@@ -798,8 +918,8 @@ impl App {
             }
             let (position, rotation) = (pose.translation.vector, pose.rotation);
             if let Some(renderizable) = scene.content.renderizable_instances.get_mut(id) {
-                renderizable.instance.transform.position = position;
-                renderizable.instance.transform.rotation = rotation;
+                renderizable.transform.position = position;
+                renderizable.transform.rotation = rotation;
             }
             if let Some(transform) = scene.content.nodes.get_mut(id).and_then(|node| node.transform_3d_mut()) {
                 transform.position = position;
@@ -810,34 +930,119 @@ impl App {
 
     /// Every model's instance buffer from its nodes' poses - grouped by
     /// model, each model's sorted by material, so every material draws one
-    /// run of them (ModelDataInstance::material_ranges).
+    /// run of them (ModelDataInstance::material_ranges). Within a material,
+    /// the shadow casters that held still since the last frame come first,
+    /// then the moving ones, then the ones that don't cast - the runs the
+    /// shadow pass draws (ModelDataInstance::shadow_runs; see
+    /// render_pipeline::shadow_renderer for why the still ones are kept
+    /// apart).
     fn write_instance_buffers(&mut self, camera_position: Vector3<f32>) {
-        let mut model_instances: HashMap<&str, Vec<(&str, InstanceRaw)>> = HashMap::new();
+        // One instance: its material, what it is to the shadows (0 a still
+        // caster, 1 a moving one, 2 none), how it's drawn, where it is
+        // (camera-relative) and its biggest scale.
+        struct Placed<'a> {
+            material: &'a str,
+            shadows: u8,
+            raw: InstanceRaw,
+            position: Vector3<f32>,
+            size: f32,
+        }
+        let mut model_instances: HashMap<&str, Vec<Placed>> = HashMap::new();
+        let last_poses = std::mem::take(&mut self.renderer.shadows.poses);
+        let mut poses = HashMap::new();
+        // Which still casters there are, where, drawn with what - summed, so
+        // it doesn't matter which order they come in.
+        let mut still_casters = 0u64;
         if let Some(content) = self.scene_manager.content() {
-            for renderizable in content.renderizable_instances.values() {
-                model_instances
-                    .entry(renderizable.model_ref.as_str())
-                    .or_default()
-                    .push((renderizable.material.as_str(), renderizable.instance.transform.to_raw(camera_position)));
+            for (id, renderizable) in content.renderizable_instances.iter() {
+                let transform = &renderizable.transform;
+                let rotation = transform.rotation.coords;
+                let pose = [
+                    transform.position.x, transform.position.y, transform.position.z,
+                    rotation.x, rotation.y, rotation.z, rotation.w,
+                    transform.scale.x, transform.scale.y, transform.scale.z,
+                ];
+                let still = last_poses.get(id) == Some(&pose);
+                let shadows = match (renderizable.casts_shadows, still) {
+                    (false, _) => 2,
+                    (true, true) => 0,
+                    (true, false) => 1,
+                };
+                if shadows == 0 {
+                    let mut hasher = DefaultHasher::new();
+                    (id, &renderizable.model_ref, &renderizable.material).hash(&mut hasher);
+                    hash_floats(&pose, &mut hasher);
+                    still_casters = still_casters.wrapping_add(hasher.finish());
+                }
+                poses.insert(id.clone(), pose);
+                let mut raw = InstanceRaw::from_transform(transform, camera_position);
+                raw.receives_shadows = if renderizable.receives_shadows { 1.0 } else { 0.0 };
+                model_instances.entry(renderizable.model_ref.as_str()).or_default().push(Placed {
+                    material: renderizable.material.as_str(),
+                    shadows,
+                    raw,
+                    position: transform.position - camera_position,
+                    size: transform.scale.abs().max(),
+                });
             }
         }
+        self.renderer.shadows.poses = poses;
 
         for (model_ref, model) in self.assets.models.drawn.iter_mut() {
             model.material_ranges.clear();
+            model.shadow_runs.clear();
             let Some(instances) = model_instances.get_mut(model_ref.as_str()) else { continue };
-            instances.sort_by(|a, b| a.0.cmp(b.0));
+            instances.sort_by(|a, b| a.material.cmp(b.material).then(a.shadows.cmp(&b.shadows)));
             let mut start = 0;
             for index in 1..=instances.len() {
-                if index == instances.len() || instances[index].0 != instances[start].0 {
-                    model.material_ranges.push((instances[start].0.to_owned(), start as u32..index as u32));
+                if index == instances.len() || instances[index].material != instances[start].material {
+                    model.material_ranges.push((instances[start].material.to_owned(), start as u32..index as u32));
                     start = index;
                 }
             }
-            let raws: Vec<InstanceRaw> = instances.iter().map(|(_, raw)| *raw).collect();
+            // The shadow runs, each in the sphere around its instances.
+            let radius = model.model.radius();
+            let mut start = 0;
+            for index in 1..=instances.len() {
+                let first = &instances[start];
+                if index < instances.len() && instances[index].material == first.material && instances[index].shadows == first.shadows {
+                    continue;
+                }
+                if first.shadows < 2 {
+                    let run = &instances[start..index];
+                    let low = run.iter().fold(first.position, |low, placed| low.inf(&placed.position));
+                    let high = run.iter().fold(first.position, |high, placed| high.sup(&placed.position));
+                    let size = run.iter().fold(0.0f32, |size, placed| size.max(placed.size));
+                    model.shadow_runs.push(ShadowRun {
+                        material: first.material.to_owned(),
+                        instances: start as u32..index as u32,
+                        still: first.shadows == 0,
+                        center: (low + high) / 2.0,
+                        radius: (high - low).norm() / 2.0 + radius * size,
+                    });
+                }
+                start = index;
+            }
+            // A still caster's meshes can still move on it (animation) - its
+            // shadow with them.
+            if model.shadow_runs.iter().any(|run| run.still) {
+                let mut hasher = DefaultHasher::new();
+                model_ref.hash(&mut hasher);
+                for mesh in model.model.mesh_lists.values().flat_map(|meshes| meshes.values()) {
+                    for transform in std::iter::once(&mesh.transform).chain(mesh.parent_transform.as_ref()) {
+                        hash_floats(transform.position.as_slice(), &mut hasher);
+                        hash_floats(transform.rotation.coords.as_slice(), &mut hasher);
+                        hash_floats(transform.scale.as_slice(), &mut hasher);
+                    }
+                }
+                still_casters = still_casters.wrapping_add(hasher.finish());
+            }
+            let raws: Vec<InstanceRaw> = instances.iter().map(|placed| placed.raw).collect();
             if !raws.is_empty() {
                 self.renderer.queue.write_buffer(&model.instance_buffer, 0, bytemuck::cast_slice(&raws));
             }
         }
+        self.renderer.shadows.still_casters = still_casters;
     }
 
     /// The game's debug windows (see DebugUi): its toggle key, the mouse
@@ -853,7 +1058,7 @@ impl App {
             return;
         }
 
-        let raw_input = self.debug_ui.raw_input([self.window.size.width, self.window.size.height]);
+        let raw_input = self.debug_ui.raw_input(&self.input, [self.window.size.width, self.window.size.height]);
         // egui lays out in points; the window's pixels can be more of them
         // (a HiDPI/Retina display).
         let pixels_per_point = self.window.pixel_size.width as f32 / self.window.size.width.max(1) as f32;
@@ -876,4 +1081,19 @@ impl App {
     fn debug_windows_shown(&self) -> bool {
         self.debug_ui.visible
     }
+}
+
+/// The ids of the scene's visible `UiLayer` nodes, bottom to top: by z
+/// index, then by id - the order they're drawn and clicked in.
+fn scene_layer_order(scene: &Scene) -> Vec<String> {
+    let mut layers: Vec<(i32, String)> = scene.content.nodes.iter()
+        .filter_map(|node| node.get_property::<UiLayer>().filter(|layer| layer.visible).map(|layer| (layer.z_index, node.id.clone())))
+        .collect();
+    layers.sort();
+    layers.into_iter().map(|(_, id)| id).collect()
+}
+
+/// The node at `path` in `node`'s `UiLayer`.
+fn layer_node<'a>(node: &'a mut Node, path: &str) -> Option<&'a mut UiNode> {
+    node.get_property_mut::<UiLayer>()?.get_mut(path)
 }

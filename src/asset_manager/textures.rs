@@ -14,8 +14,8 @@ pub struct ModelTexture {
 }
 
 /// Every model texture in memory, by its path inside the assets folder - each
-/// read once, however many nodes use it. A scene's load with it (under the
-/// loading screen) and go when a scene that doesn't use them opens.
+/// read once, however many nodes use it. A scene's load with it (in the
+/// background) and go when a scene that doesn't use them opens.
 pub struct TextureCache {
     loaded: HashMap<String, ModelTexture>,
     /// Couldn't be loaded - said once, not tried again until the next scene.

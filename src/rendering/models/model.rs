@@ -2,10 +2,10 @@ use std::{collections::HashMap, mem};
 
 
 use gltf::material::AlphaMode;
-use nalgebra::{UnitQuaternion, Vector3};
+use nalgebra::Vector3;
 use wgpu::{BindGroupLayoutDescriptor, Device};
 
-use crate::transform::Transform;
+use crate::scene_manager::node::properties::Transform3D;
 
 use super::textures::Texture;
 
@@ -71,12 +71,12 @@ pub struct Mesh {
     pub material: usize,
     pub transform_buffer: wgpu::Buffer,
     pub transform_bind_group: wgpu::BindGroup,
-    pub transform: Transform,
-    pub base_transform: Transform,
-    pub parent_transform: Option<Transform>,
+    pub transform: Transform3D,
+    pub base_transform: Transform3D,
+    pub parent_transform: Option<Transform3D>,
     pub alpha_mode: AlphaMode,
     /// Draw this mesh with backface culling OFF. Set at load from
-    /// `resources::DoubleSided` (declared per model at registration). The
+    /// `asset_manager::gltf::DoubleSided` (declared per model at registration). The
     /// glTF `doubleSided` material flag is deliberately NOT used.
     pub double_sided: bool,
     /// The geometry's own box (min, max), in the mesh's local space - before
@@ -102,11 +102,27 @@ pub struct Model {
 }
 
 impl Model {
+    /// About how far from its origin its geometry reaches, at its own size -
+    /// every mesh where its transform puts it.
+    pub fn radius(&self) -> f32 {
+        self.mesh_lists.values().flat_map(|meshes| meshes.values()).map(|mesh| {
+            let (low, high) = mesh.local_bounds;
+            let corner = Vector3::from(low).abs().sup(&Vector3::from(high).abs()).norm();
+            // Under a parent, a mesh is turned about the parent's position -
+            // at most that far again from where it'd be without.
+            let (offset, scale) = match &mesh.parent_transform {
+                Some(parent) => (2.0 * parent.position.norm() + mesh.transform.position.norm(), parent.scale),
+                None => (mesh.transform.position.norm(), mesh.transform.scale),
+            };
+            offset + corner * scale.abs().max()
+        }).fold(0.0, f32::max)
+    }
+
     /// Every mesh of the object named `name` in list `list` ("opaque" /
     /// "transparent") - ALL of its materials. An object with several
     /// materials loads as one mesh per material: the first keyed by its
     /// plain name, the rest as "<name>#prim1", "#prim2"... (see
-    /// resources::traverse_node). Anything animating an object by name has
+    /// asset_manager::gltf::traverse_node). Anything animating an object by name has
     /// to move all of them, or its materials drift apart.
     pub fn meshes_named_mut<'a>(&'a mut self, list: &str, name: &'a str) -> impl Iterator<Item = &'a mut Mesh> + 'a {
         let prefix = format!("{name}#prim");
@@ -121,7 +137,7 @@ impl Model {
     /// with this one: vertices, indices, textures, materials (wgpu's handles
     /// are reference-counted, so nothing's uploaded again). For giving each
     /// aircraft its own control surfaces, gear and afterburner without a
-    /// whole second load of its model - see `ModelSource::variant`.
+    /// whole second load of its model - see `Model::variant`.
     pub fn share(&self, device: &Device, queue: &wgpu::Queue) -> Model {
         let layout = Mesh::create_bind_group_layout(device);
         let mesh_lists = self.mesh_lists.iter()
@@ -146,8 +162,8 @@ impl MeshUniform {
     /// `transform` (the mesh's in its model), and the lowest corner of
     /// `local_bounds` (its geometry's, in its own space) once `transform` has
     /// put it there.
-    pub(crate) fn new(transform: &Transform, local_bounds: ([f32; 3], [f32; 3])) -> Self {
-        let matrix = transform.to_matrix_bufferable();
+    pub(crate) fn new(transform: &Transform3D, local_bounds: ([f32; 3], [f32; 3])) -> Self {
+        let matrix: [[f32; 4]; 4] = transform.matrix().into();
         let (lo, hi) = local_bounds;
         let mut bounds_min = [f32::MAX; 3];
         for corner in 0..8 {
@@ -220,7 +236,7 @@ impl Mesh {
     pub fn depth_below_center(&self) -> f32 {
         let (lo, hi) = self.local_bounds;
         let base = &self.base_transform;
-        let rotation = UnitQuaternion::from_quaternion(base.rotation);
+        let rotation = base.rotation;
         let lowest = (0..8).map(|corner| {
             let local = Vector3::new(
                 if corner & 1 == 0 { lo[0] } else { hi[0] },
@@ -237,29 +253,24 @@ impl Mesh {
     /// the shape's middle is drawn.
     pub fn center_offset(&self) -> Vector3<f32> {
         let base = &self.base_transform;
-        UnitQuaternion::from_quaternion(base.rotation) * base.scale.component_mul(&self.local_center())
+        base.rotation * base.scale.component_mul(&self.local_center())
     }
 
     pub fn update_transform(&self, queue: &wgpu::Queue) {
-        let transform_data: Transform;
-
-        match &self.parent_transform {
-            Some(parent_transform) => {
-                transform_data = Transform::new(
-                    parent_transform.position + UnitQuaternion::from_quaternion(parent_transform.rotation) * (self.transform.position - parent_transform.position),
-                    parent_transform.rotation * self.transform.rotation,
-                    parent_transform.scale,
-                );
+        let transform_data = match &self.parent_transform {
+            Some(parent_transform) => Transform3D {
+                position: parent_transform.position + parent_transform.rotation * (self.transform.position - parent_transform.position),
+                rotation: parent_transform.rotation * self.transform.rotation,
+                scale: parent_transform.scale,
             },
-            None => {
-                transform_data = Transform::new(self.transform.position, self.transform.rotation, self.transform.scale)
-            },
-        }
+            None => self.transform,
+        };
+        let matrix: [[f32; 4]; 4] = transform_data.matrix().into();
 
-        queue.write_buffer(&self.transform_buffer, 0, bytemuck::cast_slice(&[transform_data.to_matrix_bufferable()]));
+        queue.write_buffer(&self.transform_buffer, 0, bytemuck::cast_slice(&[matrix]));
     }
 
-    pub fn change_transform(&mut self, queue: &wgpu::Queue, transform: Transform) {
+    pub fn change_transform(&mut self, queue: &wgpu::Queue, transform: Transform3D) {
         if transform.position != self.transform.position || transform.rotation != self.transform.rotation || transform.scale != self.transform.scale {
             self.transform = transform;
             self.update_transform(queue);

@@ -1,13 +1,16 @@
-use nalgebra::{Vector3};
-use pankarta_software::game_nodes::game_object::{Collider, ColliderShape, Physics, RigidBodyData};
+use nalgebra::Vector3;
 use pankarta_software::prelude::*;
-use pankarta_software::rendering::ui::ui::Ui;
-use pankarta_software::ui::layer::Layer;
+use pankarta_software::rendering::frame::FramePlan;
+use pankarta_software::rendering::sdf_text::TextFrame;
+use pankarta_software::rendering::thick_lines::LineInstance;
+use pankarta_software::ui::components::label::Font;
+use pankarta_software::ui::ui_node::UiNode;
 use pankarta_software::ui::ui_transform::SizeValue;
 use pankarta_software::ui::widgets::text;
 use pankarta_software::ui::TextStyle;
 
 use crate::player::Player;
+use crate::sign::sign_glass;
 
 pub struct WalkingScene;
 
@@ -17,30 +20,46 @@ const CUBE_TEXTURES: [&str; 4] = [
     "textures/grid/Green/texture_01.png",
     "textures/grid/Purple/texture_01.png",
     "textures/grid/Red/texture_01.png",
-]; 
+];
 
 const PLAYER_HALF_HEIGHT: f32 = 0.9;
+
+const AIM_LINE: &str = "aim";
+const PLANE_NAME: &str = "plane_name";
+/// How far over the plane's middle its name floats (m).
+const PLANE_NAME_HEIGHT: f32 = 4.0;
 
 fn static_box(size: Vector3<f32>) -> Physics {
     Physics {
         rigidbody: RigidBodyData::fixed(),
-        colliders: vec![Collider::new(ColliderShape::Cuboid { half_extents: (size.x / 2.0, size.y / 2.0, size.z / 2.0) })],
+        colliders: vec![Collider::new(ColliderShape::Cuboid {
+            half_extents: (size.x / 2.0, size.y / 2.0, size.z / 2.0),
+        })],
     }
 }
 
 impl WalkingScene {
     pub fn new(scene: &mut Scene, app: &mut App) -> Self {
-        app.renderer.set_environment(Environment::ProceduralSky { sun: true });
+        app.renderer
+            .set_environment(Environment::ProceduralSky { sun: true });
 
         let ground = Node::new("ground")
             .with_property(Transform3D::default())
-            .with_property(Model::new(ModelSource::Plane { subdivisions: 0 }).with_scale(Vector3::new(200.0, 1.0, 200.0)))
-            .with_property(Material::standard().texture(GROUND_TEXTURE).tiled(4.0, TextureSpace::World))
+            .with_property(
+                Mesh::plane(0)
+                    .transform(Transform3D { scale: Vector3::new(200.0, 1.0, 200.0), ..Default::default() })
+                    .material(Material::standard().texture(GROUND_TEXTURE).tiled(4.0, TextureSpace::World)),
+            )
             .with_property(Physics {
-                rigidbody: RigidBodyData { is_static: true, mass: 0.0, ..Default::default() },
-                colliders:  vec![Collider::new(ColliderShape::HalfSpace { normal: Vector3::y() })],
+                rigidbody: RigidBodyData {
+                    is_static: true,
+                    mass: 0.0,
+                    ..Default::default()
+                },
+                colliders: vec![Collider::new(ColliderShape::HalfSpace {
+                    normal: Vector3::y(),
+                })],
             });
-
 
         let plane = Node::new("plane")
             .with_property(Transform3D {
@@ -49,28 +68,53 @@ impl WalkingScene {
                 ..Default::default()
             })
             .with_property(Physics {
-                rigidbody: RigidBodyData { is_static: true, mass: 0.0, ..Default::default() },
-                colliders:  vec![Collider::new(ColliderShape::TrimeshFromModel { model_path: "models/f16.glb".to_owned() } )],
+                rigidbody: RigidBodyData {
+                    is_static: true,
+                    mass: 0.0,
+                    ..Default::default()
+                },
+                colliders: vec![Collider::new(ColliderShape::TrimeshFromModel {
+                    model_path: "models/f16.glb".to_owned(),
+                })],
             })
-            .with_property(Model::new(ModelSource::File("models/f16.glb".to_owned())));
+            .with_property(Model::file("models/f16.glb"));
 
-        let player = Node::new("player").with_behavior(Player::new(Vector3::new(0.0, PLAYER_HALF_HEIGHT + 0.5, -10.0)));
+        let player = Node::new("player").with_behavior(Player::new(Vector3::new(
+            0.0,
+            PLAYER_HALF_HEIGHT + 0.5,
+            -10.0,
+        )));
 
         let sun = Node::new("sun")
             .with_property(Transform3D::facing(Vector3::new(-0.3, -1.0, -0.2)))
-            .with_property(Light::directional([1.0, 1.0, 1.0]));
+            .with_property(Light::directional([1.0, 1.0, 1.0]).shadows(true));
 
-        let mut nodes = vec![ground, player, plane, sun];
+        // Walk up behind it and look through it.
+        let glass = sign_glass("sign_glass", Vector3::new(3.0, 0.0, -6.0), 0.0);
+
+        let mut nodes = vec![ground, player, plane, sun, glass];
 
         for index in 0..12 {
             let angle = index as f32 / 12.0 * std::f32::consts::TAU;
             let height = 0.5 + (index % 4) as f32 * 0.75;
             let size = Vector3::new(2.0, height, 2.0);
-            nodes.push(Node::new(format!("cube_{index}"))
-                .with_property(Transform3D { position: Vector3::new(angle.sin() * 12.0, height / 2.0, angle.cos() * 12.0), ..Default::default() })
-                .with_property(Model::new(ModelSource::Cube).with_scale(size))
-                .with_property(Material::standard().texture(CUBE_TEXTURES[index % 4]).tiled(1.0, TextureSpace::Object))
-                .with_property(static_box(size)));
+            nodes.push(
+                Node::new(format!("cube_{index}"))
+                    .with_property(Transform3D {
+                        position: Vector3::new(
+                            angle.sin() * 12.0,
+                            height / 2.0,
+                            angle.cos() * 12.0,
+                        ),
+                        ..Default::default()
+                    })
+                    .with_property(
+                        Mesh::cube()
+                            .transform(Transform3D { scale: size, ..Default::default() })
+                            .material(Material::standard().texture(CUBE_TEXTURES[index % 4]).tiled(1.0, TextureSpace::Object)),
+                    )
+                    .with_property(static_box(size)),
+            );
         }
         for node in nodes {
             if let Err(error) = scene.spawn_node(app, node) {
@@ -79,10 +123,26 @@ impl WalkingScene {
         }
 
         // The frame rate, top left.
-        let framerate = text(app, "- fps", &TextStyle::default())
+        let framerate = text("- fps", &TextStyle::default())
             .set_padding((10.0, 10.0))
             .set_size(SizeValue::Pixels(200.0), SizeValue::Fit);
-        Layer::new(app).set_child("framerate", framerate).build(app);
+        let hud = Node::new("hud").with_property(UiLayer::new(
+            UiNode::container().set_child("framerate", framerate),
+        ));
+        if let Err(error) = scene.spawn_node(app, hud) {
+            eprintln!("{error}");
+        }
+
+        // A line from the player to the plane and the plane's name, both in
+        // the world - filled every frame in `update`.
+        app.add_line_set(AIM_LINE, false);
+        app.add_text_set(PLANE_NAME, false);
+        // The sign glass is drawn in its own pass, after the solid world it's
+        // seen against (see sign_glass.ron).
+        app.renderer.frame_plan = FramePlan::engine_default()
+            .insert_after_scene("opaque", |steps| steps.scene("hud"))
+            .lines(AIM_LINE)
+            .text(PLANE_NAME);
 
         app.window.set_cursor_locked(true);
         Self
@@ -90,10 +150,53 @@ impl WalkingScene {
 }
 
 impl SceneBehaviour for WalkingScene {
-    fn update(&mut self, _scene: &mut Scene, app: &mut App, _ctx: &mut FrameContext) {
-        if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "framerate").and_then(|node| node.as_label_mut()) {
+    fn update(&mut self, scene: &mut Scene, app: &mut App, _ctx: &mut FrameContext) {
+        if let Some(label) = scene
+            .get_node_mut("hud")
+            .and_then(|node| node.get_property_mut::<UiLayer>())
+            .and_then(|ui| ui.label_mut("framerate"))
+        {
             let fps = app.time.fps().round();
-            label.set_text(&mut app.ui.text.font_system, &format!("{fps} fps"), true);
+            label.set_text(format!("{fps} fps"));
         }
+
+        let transform_of = |id: &str| {
+            scene
+                .get_node(id)
+                .and_then(|node| node.get_property::<Transform3D>())
+                .copied()
+        };
+        let (Some(player), Some(plane), Some(camera)) = (
+            transform_of("player"),
+            transform_of("plane"),
+            transform_of("camera"),
+        ) else {
+            return;
+        };
+
+        let lines = app.renderer.render_sets.lines(AIM_LINE);
+        lines.dynamic.clear();
+        lines.dynamic.push(LineInstance {
+            start: player.position.into(),
+            end: plane.position.into(),
+            color: [1.0, 0.0, 0.0, 1.0],
+            width: 2.0,
+        });
+
+        // Facing the camera, which looks along its +Z with +Y up - so its
+        // right is -X.
+        let name = app.renderer.render_sets.text(PLANE_NAME);
+        name.clear();
+        name.push(
+            "F-16",
+            Font::default(),
+            TextFrame::world(
+                plane.position + Vector3::y() * PLANE_NAME_HEIGHT,
+                camera.rotation * -Vector3::x(),
+                camera.rotation * Vector3::y(),
+                1.0,
+            ),
+            [1.0, 1.0, 1.0, 1.0],
+        );
     }
 }

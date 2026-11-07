@@ -176,6 +176,9 @@ pub struct ParticleFrameInfo {
     /// The light from the whole sky (`Renderer::ambient_light`) - on lit
     /// particles, on top of the sun's.
     pub ambient: Vector3<f32>,
+    /// The world height of the scene's local Y = 0 (see `WorldOrigin`) -
+    /// the sea level is a world height.
+    pub origin_y: f64,
 }
 
 /// One emitter as it is this frame - which node it's on, and where that
@@ -602,6 +605,33 @@ impl ParticleRenderer {
         self.sea_level = sea_level;
     }
 
+    /// Moves everything already put out - live particles, trails, and where
+    /// each emitter and the camera were last frame - by `shift`, for the
+    /// floating origin (see `WorldOrigin`). Particles on the GPU are kept
+    /// relative to the camera, which moves the same, so they stay as they
+    /// are.
+    pub(crate) fn shift_origin(&mut self, shift: Vector3<f32>) {
+        let shift_64 = shift.cast::<f64>();
+        if let Some(camera) = &mut self.previous_camera {
+            *camera += shift_64;
+        }
+        for runtime in self.runtimes.values_mut() {
+            if let Some((position, _)) = &mut runtime.previous {
+                *position += shift;
+            }
+            let trail = &mut runtime.trail;
+            for point in &mut trail.points {
+                point.position += shift_64;
+            }
+            if let Some((head, _)) = &mut trail.head {
+                *head += shift_64;
+            }
+            if let Some(last_laid) = &mut trail.last_laid {
+                *last_laid += shift_64;
+            }
+        }
+    }
+
     fn make_depth_bind_group(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, depth_view: &wgpu::TextureView) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("particle_depth_bind_group"),
@@ -743,7 +773,7 @@ impl ParticleRenderer {
             camera_forward: [forward.x, forward.y, forward.z, self.time % 1000.0],
             camera_delta: [camera_delta.x, camera_delta.y, camera_delta.z, dt],
             // No sea: far below anything a particle reaches.
-            wind: [self.wind.x, self.wind.y, self.wind.z, self.sea_level.unwrap_or(-1.0e9) - frame.camera_position.y],
+            wind: [self.wind.x, self.wind.y, self.wind.z, self.sea_level.map_or(-1.0e9, |sea| (sea as f64 - frame.origin_y) as f32) - frame.camera_position.y],
             sun_direction: [sun.x, sun.y, sun.z, 0.0],
             sun_color: [frame.sun_color.x, frame.sun_color.y, frame.sun_color.z, 0.0],
             gravity: [frame.gravity.x, frame.gravity.y, frame.gravity.z, 0.0],
@@ -800,7 +830,7 @@ impl ParticleRenderer {
         if self.sprites.contains_key(path) || self.failed_sprites.contains(path) {
             return;
         }
-        let texture = crate::resources::load_asset_binary(path)
+        let texture = crate::asset_manager::load_asset_binary(path)
             .map_err(|error| error.to_string())
             .and_then(|bytes| image::load_from_memory(&bytes).map_err(|error| error.to_string()))
             .and_then(|image| Texture::from_image(&image, device, queue, Some(path)).map_err(|error| error.to_string()));

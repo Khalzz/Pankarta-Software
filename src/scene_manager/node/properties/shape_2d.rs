@@ -1,8 +1,6 @@
-use nalgebra::Vector2;
-
 use crate::ui::color::UiColor;
 
-use super::offset_2d::Offset2D;
+use super::transform::Transform2D;
 
 /// What a `Shape2D` is - sizes in UI units (see `Transform2D`).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -12,23 +10,21 @@ pub enum ShapeKind {
 }
 
 /// A flat shape drawn on a 2D node (one with a `Transform2D`), centered on
-/// the node's position - plus its `offset`:
+/// the node - moved from there by its own `transform`:
 ///
 ///     Node::new("box")
 ///         .with_property(Transform2D { position, ..Default::default() })
 ///         .with_property(Shape2D::square(80.0).color(UiColor::Hex("#3B82F6")))
 ///
-/// It scales with the node (a circle by the larger of the node's two
-/// scales). Drawn after the world and before the UI (see
-/// `FramePlan::nodes_2d`). Which of a node's visuals is in front: the one
-/// put on last - unless its `z_index` says otherwise, which replaces the
-/// node's own `Transform2D::z_index` for it.
+/// See docs/shapes_and_lines.md.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Shape2D {
     pub kind: ShapeKind,
     pub color: UiColor,
-    pub offset: Offset2D,
-    pub z_index: Option<i32>,
+    /// Relative to its node (see `Transform2D::place_visual`).
+    pub transform: Transform2D,
+    /// Doesn't turn with its node.
+    pub upright: bool,
 }
 
 impl Shape2D {
@@ -48,7 +44,7 @@ impl Shape2D {
     }
 
     fn new(kind: ShapeKind) -> Self {
-        Self { kind, color: UiColor::WHITE, offset: Offset2D::default(), z_index: None }
+        Self { kind, color: UiColor::WHITE, transform: Transform2D::default(), upright: false }
     }
 
     pub fn color(mut self, color: UiColor) -> Self {
@@ -56,28 +52,16 @@ impl Shape2D {
         self
     }
 
-    /// Moved `x`, `y` from the node's position (see `Offset2D`).
-    pub fn offset(mut self, x: f32, y: f32) -> Self {
-        self.offset.position = Vector2::new(x, y);
+    /// Where it sits on its node: moved, turned, scaled, and its z index
+    /// added to the node's.
+    pub fn transform(mut self, transform: Transform2D) -> Self {
+        self.transform = transform;
         self
     }
 
-    /// Turned `radians` (clockwise) on top of the node's rotation.
-    pub fn rotated(mut self, radians: f32) -> Self {
-        self.offset.rotation = radians;
-        self
-    }
-
-    /// Doesn't turn with the node - neither the shape nor its offset (see
-    /// `Offset2D::inherit_rotation`).
+    /// Moves with its node, but doesn't turn with it.
     pub fn upright(mut self) -> Self {
-        self.offset.inherit_rotation = false;
-        self
-    }
-
-    /// Drawn at `z_index` instead of the node's (see `Transform2D::z_index`).
-    pub fn z_index(mut self, z_index: i32) -> Self {
-        self.z_index = Some(z_index);
+        self.upright = true;
         self
     }
 }

@@ -1,21 +1,19 @@
 use std::time::{Duration, Instant};
 
-/// The frame clock - `app.time`.
-///
-/// `time_scale` speeds the game up or slows it down: 1 is normal, 0.5 half
-/// speed, 0 paused. It scales `delta_time` (what scenes, node behaviors,
-/// particles and animations move by) and the physics alike; menus that must
-/// keep moving while the game is paused use `unscaled_delta_time`.
+
+/**
+ * # Timing
+ * 
+ * Timing its a structure defined mainly to work on time related elements, mostly like:
+ * 
+ * - Delta time for runtime.
+ * - Unscaled delta time: The delta time that its not affected by time scale.
+ * - Time_scale: defines the speed of runtime.
+ */
 pub struct Timing {
-    /// Seconds since the last frame, times `time_scale`.
     pub delta_time: f32,
-    /// Seconds since the last frame, as they really passed.
     pub unscaled_delta_time: f32,
     pub time_scale: f32,
-    /// Scaled seconds since the app started, wrapped every 10,000 so its
-    /// precision doesn't degrade over a long session - for shader animation
-    /// (the light buffer's `time`), whose waves are periodic so the wrap
-    /// doesn't show.
     shader_time: f32,
     last_frame: Instant,
     frame_count: u32,
@@ -46,12 +44,10 @@ impl Timing {
         self.calculate_framerate();
     }
 
-    /// Whether `time_scale` has the game stopped.
     pub fn is_paused(&self) -> bool {
         self.time_scale <= 0.0
     }
 
-    /// See `shader_time`.
     pub fn shader_time(&self) -> f32 {
         self.shader_time
     }

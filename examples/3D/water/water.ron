@@ -7,6 +7,8 @@
     // See-through: what's under the water still has to be drawn, not hidden
     // behind the surface in the depth buffer.
     depth_write: false,
+    // See-through: the sun goes through it.
+    casts_shadows: false,
     // The depth drawn so far, at group 0 bindings 16/17 - how deep the water
     // is in front of whatever is under it.
     reads: [Depth],

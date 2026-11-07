@@ -1,18 +1,16 @@
 use nalgebra::Vector2;
 use pankarta_software::app::App;
 use pankarta_software::input::source::{InputSource, Key};
-use pankarta_software::input::input;
-use pankarta_software::rendering::ui::ui::Ui;
 use pankarta_software::scene_manager::behavior::Behavior;
 use pankarta_software::scene_manager::node::Node;
-use pankarta_software::scene_manager::node::properties::{CameraLens, Shape2D, Transform2D};
+use pankarta_software::scene_manager::node::properties::{Shape2D, Transform2D, UiLayer};
 use pankarta_software::scene_manager::scene::SceneBehaviour;
 use pankarta_software::scene_manager::scene_access::SceneAccess;
 use pankarta_software::ui::TextStyle;
 use pankarta_software::ui::color::UiColor;
-use pankarta_software::ui::layer::Layer;
+use pankarta_software::ui::ui_node::UiNode;
 use pankarta_software::ui::ui_transform::SizeValue;
-use pankarta_software::window::window::WindowMode;
+use pankarta_software::window::WindowMode;
 use pankarta_software::ui::widgets::text;
 
 
@@ -28,18 +26,27 @@ impl SceneBehaviour for Test2DScene {
 
     scene.spawn_node(app, node_2d).unwrap();
 
-    let framerate_label = text(app, "600 fps", &TextStyle::default())
+    // The HUD is a node: its UI is its UiLayer, kept up by its behavior.
+    let framerate_label = text("600 fps", &TextStyle::default())
         .set_padding((10.0, 10.0))
         .set_size(SizeValue::Pixels(200.0), SizeValue::Fit);
+    let hud = Node::new("hud")
+      .with_property(UiLayer::new(UiNode::container().set_child("framerate", framerate_label)))
+      .with_behavior(FpsCounter);
 
-    Layer::new(app).set_child("framerate", framerate_label).build(app);
+    scene.spawn_node(app, hud).unwrap();
   }
+}
 
-  fn update(&mut self, scene: &mut pankarta_software::prelude::Scene, app: &mut App, ctx: &mut pankarta_software::prelude::FrameContext) {
-      if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "framerate").and_then(|node| node.as_label_mut()) {
-          let fps = app.time.fps().round();
-          label.set_text(&mut app.ui.text.font_system, &format!("{fps} fps"), true);
-      }
+// Shows the frame rate in its node's UI.
+struct FpsCounter;
+
+impl Behavior for FpsCounter {
+  fn update(&mut self, node: &mut Node, _scene: &mut SceneAccess, app: &mut App) {
+    let fps = app.time.fps().round();
+    if let Some(label) = node.get_property_mut::<UiLayer>().and_then(|ui| ui.label_mut("framerate")) {
+      label.set_text(format!("{fps} fps"));
+    }
   }
 }
 
@@ -56,7 +63,7 @@ impl Player {
 
 impl Behavior for Player {
   fn update(&mut self, node: &mut Node, _scene: &mut SceneAccess, app: &mut App) {
-    let direction = input::get_vector("Left", "Right", "Up", "Down").normalize();
+    let direction = app.input.get_vector("Left", "Right", "Up", "Down").normalize();
 
     if let Some(transform) = node.get_property_mut::<Transform2D>() {
       transform.position += direction * self.speed * app.time.delta_time;
@@ -80,10 +87,10 @@ async fn main() {
     app.window.set_title("2D Example");
 
     // Input binding setup
-    input::bind("Left", InputSource::key(Key::A));
-    input::bind("Right", InputSource::key(Key::D));
-    input::bind("Up", InputSource::key(Key::W));
-    input::bind("Down", InputSource::key(Key::S));
+    app.input.bind("Left", InputSource::key(Key::A));
+    app.input.bind("Right", InputSource::key(Key::D));
+    app.input.bind("Up", InputSource::key(Key::W));
+    app.input.bind("Down", InputSource::key(Key::S));
 
     // creating and openning the scene
     app.scene_manager.create_scene("main", |scene, app| {      

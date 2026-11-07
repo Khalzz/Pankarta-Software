@@ -1,37 +1,24 @@
-use nalgebra::{Matrix4, Vector3, UnitQuaternion};
-use wgpu::Buffer;
+use nalgebra::{Matrix3, Vector3};
+use wgpu::util::DeviceExt;
+use wgpu::{Buffer, Device};
 
-use crate::{game_nodes::game_object::{GameObject, Transform}, rendering::models::model::Model};
+use crate::{rendering::models::model::Model, scene_manager::node::properties::Transform3D};
 
-// When moving player we move instance; when moving world object we move renderizable_transform
+/// A node drawn with a model (see scene_manager::render_bridge).
 pub struct InstanceData {
-    pub renderizable_transform: Transform,
-    pub instance: GameObject,
+    /// Where it's drawn - its node's Transform3D with its mesh's or part's
+    /// own placed inside (see render_bridge::place).
+    pub transform: Transform3D,
     pub model_ref: String,
-    /// The shader it's drawn with (its node's `Material`) - see
+    /// The node it's drawn for - a model's parts are several instances of one
+    /// node.
+    pub node: String,
+    /// The shader it's drawn with (its mesh's or model's `Material`) - see
     /// engine::rendering::shader_library.
     pub material: String,
-}
-
-#[derive(Clone)]
-pub struct Instance {
-    pub position: Vector3<f32>,
-    pub rotation: UnitQuaternion<f32>,
-    pub scale: Vector3<f32>,
-}
-
-impl Instance {
-    pub fn to_raw(&self) -> InstanceRaw {
-        let translation = Matrix4::new_translation(&self.position);
-        let rotation = self.rotation.to_homogeneous();
-        let scale = Matrix4::new_nonuniform_scaling(&self.scale);
-        let model: Matrix4<f32> = translation * rotation * scale;
-
-        InstanceRaw {
-            model: model.into(),
-            normal: (*self.rotation.to_rotation_matrix().matrix()).into(),
-        }
-    }
+    /// Its mesh's or model's `casts_shadows` and `receives_shadows`.
+    pub casts_shadows: bool,
+    pub receives_shadows: bool,
 }
 
 pub struct ModelDataInstance {
@@ -42,6 +29,10 @@ pub struct ModelDataInstance {
     /// material draws - they're written sorted by material, so each is one
     /// run (see App::run). Empty until the first frame's written.
     pub material_ranges: Vec<(String, std::ops::Range<u32>)>,
+    /// The runs of them that cast shadows - each run one material, either
+    /// all held still since the last frame or all moving (see
+    /// App::write_instance_buffers).
+    pub shadow_runs: Vec<ShadowRun>,
     /// Some of its meshes drawn with another material (by mesh name, the
     /// material instance - see Material::meshes), set every frame from the
     /// node that has them.
@@ -61,15 +52,42 @@ impl ModelDataInstance {
     }
 }
 
+/// Instances of one model, one material, that cast shadows - all held still
+/// or all moving - and the sphere they're all in (camera-relative), for
+/// leaving them out of a cascade they can't fall in (see Cascade::sees).
+pub struct ShadowRun {
+    pub material: String,
+    pub instances: std::ops::Range<u32>,
+    pub still: bool,
+    pub center: Vector3<f32>,
+    pub radius: f32,
+}
+
 // Quaternions are not very usable in wgpu, so we save the raw instance here directly
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct InstanceRaw {
     pub(crate) model: [[f32; 4]; 4],
     pub(crate) normal: [[f32; 3]; 3],
+    /// 1 if shadows fall on it, 0 if not (`Model::receives_shadows`).
+    pub(crate) receives_shadows: f32,
 }
 
 impl InstanceRaw {
+    /// `transform`'s, drawn camera-relative: subtracting `camera_position`
+    /// here, once, on the CPU keeps the numbers the GPU multiplies small no
+    /// matter how far it is from the world origin, avoiding the precision
+    /// loss (z-fighting, vertex jitter) that absolute world coordinates in
+    /// the matrix cause.
+    pub fn from_transform(transform: &Transform3D, camera_position: Vector3<f32>) -> Self {
+        let relative = Transform3D { position: transform.position - camera_position, ..*transform };
+        InstanceRaw {
+            model: relative.matrix().into(),
+            normal: Matrix3::from(transform.rotation).into(),
+            receives_shadows: 1.0,
+        }
+    }
+
     // Create a vertex buffer layout for InstanceRaw
     pub fn desc() -> wgpu::VertexBufferLayout<'static> {
         use std::mem;
@@ -114,7 +132,29 @@ impl InstanceRaw {
                     shader_location: 11,
                     format: wgpu::VertexFormat::Float32x3,
                 },
+                // Whether shadows fall on it.
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 25]>() as wgpu::BufferAddress,
+                    shader_location: 12,
+                    format: wgpu::VertexFormat::Float32,
+                },
             ],
         }
     }
+}
+
+/// One instance buffer holding `instances`, drawn from `camera_position`
+/// (see `InstanceRaw::from_transform`).
+pub fn create_instance_buffer(instances: &[&Transform3D], device: &Device, camera_position: Vector3<f32>) -> Buffer {
+    let raw_instances: Vec<InstanceRaw> = instances.iter()
+    .map(|transform| InstanceRaw::from_transform(transform, camera_position))
+    .collect();
+
+    device.create_buffer_init(
+        &wgpu::util::BufferInitDescriptor {
+            label: Some("Instance Buffer"),
+            contents: bytemuck::cast_slice(&raw_instances),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        }
+    )
 }

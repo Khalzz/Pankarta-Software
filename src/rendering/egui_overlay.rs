@@ -22,8 +22,8 @@
 
 use sdl2::keyboard::Keycode;
 
-use crate::input::input;
-use crate::window::window::CursorIcon;
+use crate::input::input::{self, Input};
+use crate::window::CursorIcon;
 
 pub struct DebugUi {
     pub ctx: egui::Context,
@@ -80,9 +80,9 @@ impl DebugUi {
 
     /// This frame's input, as egui wants it - `screen_size` is the window
     /// in points (the space the mouse is reported in).
-    pub(crate) fn raw_input(&self, screen_size: [u32; 2]) -> egui::RawInput {
-        let pointer = egui::pos2(input::mouse_x() as f32, input::mouse_y() as f32);
-        let (shift, ctrl) = (input::shift_down(), input::ctrl_down());
+    pub(crate) fn raw_input(&self, input: &Input, screen_size: [u32; 2]) -> egui::RawInput {
+        let pointer = egui::pos2(input.mouse_x() as f32, input.mouse_y() as f32);
+        let (shift, ctrl) = (input.shift_down(), input.ctrl_down());
         let modifiers = egui::Modifiers { shift, ctrl, command: ctrl, ..Default::default() };
 
         let mut raw_input = egui::RawInput {
@@ -91,14 +91,14 @@ impl DebugUi {
             ..Default::default()
         };
         raw_input.events.push(egui::Event::PointerMoved(pointer));
-        let scroll = input::mouse_scroll_y();
+        let scroll = input.mouse_scroll_y();
         if scroll != 0.0 {
             raw_input.events.push(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta: egui::vec2(0.0, scroll), modifiers });
         }
         // Every press and release as it happened, where it happened - not the
         // button's state sampled once a frame, which misses a click that goes
         // down and up between two frames.
-        for event in input::mouse_button_events() {
+        for event in input.mouse_button_events() {
             let button = match event.button {
                 sdl2::mouse::MouseButton::Left => egui::PointerButton::Primary,
                 sdl2::mouse::MouseButton::Right => egui::PointerButton::Secondary,
@@ -110,7 +110,7 @@ impl DebugUi {
             raw_input.events.push(egui::Event::PointerButton { pos, button, pressed: event.pressed, modifiers });
         }
         raw_input.events.push(egui::Event::PointerMoved(pointer));
-        raw_input.events.extend(input::typed_input().iter().filter_map(typing_event));
+        raw_input.events.extend(input.typed_input().iter().filter_map(typing_event));
 
         // The real time and frame length. Without them egui assumes 1/60 s a
         // frame - at a few hundred frames a second its clock runs several

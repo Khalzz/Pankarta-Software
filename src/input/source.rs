@@ -1,19 +1,19 @@
 //! One physical key, button or axis direction on one device - what
-//! `input::bind` binds an action to, what `input::is_pressed` checks, and
-//! what `input::read_input` hands back:
+//! `app.input.bind` binds an action to, what `app.input.is_pressed` checks,
+//! and what `app.input.read_input` hands back:
 //!
-//!     input::bind("jump", InputSource::key(Key::Space));
-//!     input::bind("jump", InputSource::controller(Button::A));
-//!     input::bind("left", InputSource::controller_axis(Axis::LeftX, false));
+//!     app.input.bind("jump", InputSource::key(Key::Space));
+//!     app.input.bind("jump", InputSource::controller(Button::A));
+//!     app.input.bind("left", InputSource::controller_axis(Axis::LeftX, false));
 //!
-//!     if let Some(source) = input::read_input() {
+//!     if let Some(source) = app.input.read_input() {
 //!         println!("{source}");              // "Space", "Controller A", "VKB-Sim Gladiator: Button 3"
-//!         input::bind("fire", source);
+//!         app.input.bind("fire", source);
 //!     }
 //!
 //! A source can also be an action - `InputSource::action("jump")`, or just
-//! `"jump"` wherever a source is taken (`input::get_axis("Left", "Right")`,
-//! `input::is_pressed("jump")`): whatever is bound to it.
+//! `"jump"` wherever a source is taken (`app.input.get_axis("Left", "Right")`,
+//! `app.input.is_pressed("jump")`): whatever is bound to it.
 //!
 //! Keys, buttons and axes are named by the types re-exported here (`Key`,
 //! `Button`, `Axis`, `MouseButton` - SDL's), so a misspelled one doesn't
@@ -51,7 +51,7 @@ pub enum InputDevice {
     /// by the name SDL reports for it.
     Joystick(String),
     /// Not a device: an action, by name - whatever is bound to it (see
-    /// `input::bind`).
+    /// `app.input.bind`).
     Action,
 }
 

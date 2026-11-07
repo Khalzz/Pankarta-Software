@@ -47,7 +47,7 @@ pub enum Binding {
         deadzone: f32,
         /// A lever (a throttle): its whole travel is 0..1, end to end -
         /// instead of a centered stick axis, 0 at its center and 1 at one
-        /// end (see `input::absolute_value`).
+        /// end (see `Input::absolute_value`).
         #[serde(default, skip_serializing_if = "is_false")]
         full_range: bool,
     },

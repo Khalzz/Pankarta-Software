@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
+use gltf::material::AlphaMode;
 use wgpu::RenderPassDepthStencilAttachment;
 
 use crate::app::App;
@@ -8,9 +9,12 @@ use crate::rendering::lines::Lines;
 use crate::rendering::renderer::Renderer;
 use crate::rendering::frame::{FramePlan, FrameStep};
 use crate::rendering::instance_management::ModelDataInstance;
+use crate::rendering::render_pipeline::shadow_renderer::Cascade;
 use crate::rendering::render_sets::RenderSets;
-use crate::rendering::shader_library::{Blend, Cull, Kind, Overlay, PipelineKey, Placement, BLIT, STANDARD};
+use crate::rendering::node_visuals::{NODE_LINES, NODE_TEXT};
+use crate::rendering::shader_library::{Blend, Cull, Kind, Overlay, PipelineKey, Placement, BLIT, SDF_TEXT, STANDARD, THICK_LINES};
 use crate::scene_manager::node::properties::Material;
+use crate::scene_manager::render_bridge;
 
 /// A mesh's name without the `#primN` an object with several materials
 /// loads its later ones with (see Model::meshes_named_mut).
@@ -50,7 +54,7 @@ fn hash_step(step: &FrameStep, hasher: &mut DefaultHasher) {
         FrameStep::Ui { layer } => (*layer as u8).hash(hasher),
         FrameStep::Fullscreen { shader } => shader.hash(hasher),
         FrameStep::Custom { name, .. } => name.hash(hasher),
-        FrameStep::CopyDepth | FrameStep::Particles | FrameStep::Nodes2D | FrameStep::EndTarget => {}
+        FrameStep::CopyDepth | FrameStep::Particles | FrameStep::Nodes3D | FrameStep::Nodes2D | FrameStep::EndTarget => {}
     }
 }
 
@@ -79,7 +83,7 @@ pub(crate) fn color_attachment(view: &wgpu::TextureView, load: wgpu::LoadOp<wgpu
     })
 }
 
-fn depth_attachment(view: &wgpu::TextureView, load: wgpu::LoadOp<f32>) -> Option<RenderPassDepthStencilAttachment<'_>> {
+pub(crate) fn depth_attachment(view: &wgpu::TextureView, load: wgpu::LoadOp<f32>) -> Option<RenderPassDepthStencilAttachment<'_>> {
     Some(RenderPassDepthStencilAttachment {
         view,
         depth_ops: Some(wgpu::Operations { load, store: wgpu::StoreOp::Store }),
@@ -214,12 +218,14 @@ impl App {
         });
         if let Some(content) = self.scene_manager.content() {
             for node in content.nodes.iter() {
-                let Some(material) = node.get_property::<Material>() else { continue };
-                total = total.wrapping_add(hash_of(|hasher| {
-                    node.id.hash(hasher);
-                    hash_material(material, hasher);
-                    content.renderizable_instances.get(&node.id).map(|instance| &instance.model_ref).hash(hasher);
-                }));
+                for draw in render_bridge::draws(node) {
+                    let Some(material) = &draw.material else { continue };
+                    total = total.wrapping_add(hash_of(|hasher| {
+                        draw.id.hash(hasher);
+                        hash_material(material, hasher);
+                        content.renderizable_instances.get(&draw.id).map(|instance| &instance.model_ref).hash(hasher);
+                    }));
+                }
             }
         }
         for (model_ref, model) in &self.assets.models.drawn {
@@ -251,6 +257,8 @@ impl App {
                 hash_material(&text.material, hasher);
             }));
         }
+        let visuals = &self.renderer.node_visuals;
+        total = total.wrapping_add(hash_of(|hasher| ("node_visuals", visuals.uses_lines(), visuals.uses_text()).hash(hasher)));
         total
     }
 
@@ -271,24 +279,28 @@ impl App {
         // brought is loaded now, through the AssetManager.
         if let Some(content) = self.scene_manager.content() {
             let textures: Vec<String> = content.nodes.iter()
-                .filter_map(|node| node.get_property::<Material>())
-                .flat_map(|material| material.textures().cloned())
+                .flat_map(render_bridge::draws)
+                .filter_map(|draw| draw.material)
+                .flat_map(|material| material.textures().cloned().collect::<Vec<_>>())
                 .collect();
             self.assets.textures.load_missing(&self.renderer.device, &self.renderer.queue, textures.iter().map(String::as_str));
         }
         if let Some(content) = self.scene_manager.content() {
-            for node in content.nodes.iter() {
-                let Some(material) = node.get_property::<Material>() else { continue };
-                let key = material.key(&node.id);
-                self.renderer.shaders.set_instance(&key, &material.shader, &material.params);
+            for draw in content.nodes.iter().flat_map(render_bridge::draws) {
+                let Some(material) = &draw.material else { continue };
+                let material: &Material = material;
+                let key = material.key(&draw.id);
+                let params = origin_params(material, &self.origin);
+                self.renderer.shaders.set_instance(&key, &material.shader, params.as_ref().unwrap_or(&material.params));
                 self.renderer.shaders.set_instance_texture(&key, material.texture.as_deref());
                 if material.meshes.is_empty() {
                     continue;
                 }
-                let Some(model) = content.renderizable_instances.get(&node.id).and_then(|instance| self.assets.models.drawn.get_mut(&instance.model_ref)) else { continue };
+                let Some(model) = content.renderizable_instances.get(&draw.id).and_then(|instance| self.assets.models.drawn.get_mut(&instance.model_ref)) else { continue };
                 for (mesh, mesh_material) in &material.meshes {
-                    let key = mesh_material.mesh_key(&node.id, mesh);
-                    self.renderer.shaders.set_instance(&key, &mesh_material.shader, &mesh_material.params);
+                    let key = mesh_material.mesh_key(&draw.id, mesh);
+                    let params = origin_params(mesh_material, &self.origin);
+                    self.renderer.shaders.set_instance(&key, &mesh_material.shader, params.as_ref().unwrap_or(&mesh_material.params));
                     self.renderer.shaders.set_instance_texture(&key, mesh_material.texture.as_deref());
                     model.mesh_materials.insert(mesh.clone(), key);
                 }
@@ -330,6 +342,15 @@ impl App {
             let key = RenderSets::text_key(name, text);
             self.renderer.shaders.set_instance(&key, &text.material.shader, &text.material.params);
             overlays.push((key, Kind::Text));
+        }
+        // The nodes' lines and text, once a scene has any.
+        if self.renderer.node_visuals.uses_lines() {
+            self.renderer.shaders.set_instance(NODE_LINES, THICK_LINES, &Default::default());
+            overlays.push((NODE_LINES.to_owned(), Kind::Lines));
+        }
+        if self.renderer.node_visuals.uses_text() {
+            self.renderer.shaders.set_instance(NODE_TEXT, SDF_TEXT, &Default::default());
+            overlays.push((NODE_TEXT.to_owned(), Kind::Text));
         }
         materials.extend(overlays.iter().map(|(key, _)| key.clone()));
         materials.extend(["engine/ui_error", "engine/sdf_text_error", "engine/thick_lines_error"].map(str::to_owned));
@@ -452,6 +473,128 @@ impl App {
         }
     }
 
+    /// The sun's shadow maps (see render_pipeline::shadow_renderer) - when
+    /// it has shadows this frame. For each cascade: its still casters' map
+    /// drawn again if what's in it changed, copied into the map read unless
+    /// that already holds just it, and the moving casters in its box drawn
+    /// over that.
+    fn render_shadow_pass(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        if !self.renderer.shadows.active {
+            return;
+        }
+        // What the still casters' maps show - which casters, and the
+        // materials they're drawn with (a shader saved, a material set up
+        // again) - besides where each cascade is.
+        let mut hasher = DefaultHasher::new();
+        self.renderer.shadows.still_casters.hash(&mut hasher);
+        self.renderer.shaders.changes().hash(&mut hasher);
+        self.renderer.placed.as_ref().map(|(fingerprint, _)| *fingerprint).hash(&mut hasher);
+        let still = hasher.finish();
+        let keys: Vec<u64> = self.renderer.shadows.cascades.iter().map(|cascade| cascade.placed ^ still).collect();
+        let mut moved = Vec::with_capacity(keys.len());
+
+        let shadows = &self.renderer.shadows;
+        let size = shadows.resolution();
+        for (index, cascade) in shadows.cascades.iter().enumerate() {
+            let key = Some(keys[index]);
+            if cascade.still_drawn != key {
+                let mut render_pass = Self::begin_shadow_pass(encoder, &cascade.still_view, wgpu::LoadOp::Clear(1.0));
+                self.draw_shadow_casters(&mut render_pass, cascade, true);
+            }
+            let moving = self.drawn_models().any(|(_, model)| model.shadow_runs.iter().any(|run| !run.still && cascade.sees(run.center, run.radius)));
+            // Unless the map read already holds just the still casters' -
+            // nothing moving was drawn over it, and they haven't changed.
+            if moving || cascade.copied != key {
+                let layer = |texture| wgpu::TexelCopyTextureInfo { texture, mip_level: 0, origin: wgpu::Origin3d { x: 0, y: 0, z: index as u32 }, aspect: wgpu::TextureAspect::All };
+                encoder.copy_texture_to_texture(layer(&shadows.still_map), layer(&shadows.map.texture), wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 });
+            }
+            if moving {
+                let mut render_pass = Self::begin_shadow_pass(encoder, &cascade.view, wgpu::LoadOp::Load);
+                self.draw_shadow_casters(&mut render_pass, cascade, false);
+            }
+            moved.push(moving);
+        }
+        for ((cascade, key), moving) in self.renderer.shadows.cascades.iter_mut().zip(keys).zip(moved) {
+            cascade.still_drawn = Some(key);
+            cascade.copied = (!moving).then_some(key);
+        }
+    }
+
+    fn begin_shadow_pass<'e>(encoder: &'e mut wgpu::CommandEncoder, view: &wgpu::TextureView, load: wgpu::LoadOp<f32>) -> wgpu::RenderPass<'e> {
+        encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("Shadow Pass"),
+            color_attachments: &[],
+            depth_stencil_attachment: depth_attachment(view, load),
+            occlusion_query_set: None,
+            timestamp_writes: None,
+        })
+    }
+
+    /// The casters that held still (`still`) or the moving ones, that can
+    /// fall in `cascade`'s box, into the shadow pass `render_pass`: every
+    /// solid mesh and cut-out one (alpha mode Mask) whose material casts
+    /// shadows (`casts_shadows`) - with its material's own vertex code if
+    /// it moves vertices, else the shadow pass's own (leaving out what a
+    /// cut-out one's texture leaves out).
+    fn draw_shadow_casters(&self, render_pass: &mut wgpu::RenderPass<'_>, cascade: &Cascade, still: bool) {
+        let shadows = &self.renderer.shadows;
+        // Drawn from the sun - bound where the camera goes; and the light
+        // without the maps being drawn into.
+        render_pass.set_bind_group(1, &cascade.bind_group, &[]);
+        render_pass.set_bind_group(3, &self.renderer.light.rendering_data.unshadowed_bind_group, &[]);
+        let mut bound: Option<&wgpu::RenderPipeline> = None;
+        for (model_ref, model_data) in self.drawn_models() {
+            let mut runs = model_data.shadow_runs.iter().filter(|run| run.still == still && cascade.sees(run.center, run.radius)).peekable();
+            if runs.peek().is_none() {
+                continue;
+            }
+            render_pass.set_vertex_buffer(0, model_data.model.vertex_buffer.slice(..));
+            render_pass.set_vertex_buffer(1, model_data.instance_buffer.slice(..));
+            render_pass.set_index_buffer(model_data.model.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            for run in runs {
+                for list in ["opaque", "transparent"] {
+                    let Some(meshes) = model_data.model.mesh_lists.get(list) else { continue };
+                    for (mesh_key, mesh) in meshes {
+                        let cutout = mesh.alpha_mode == AlphaMode::Mask;
+                        // See-through (blended) meshes don't cast.
+                        if list == "transparent" && !cutout {
+                            continue;
+                        }
+                        let key = model_data.mesh_materials.get(mesh_base_name(mesh_key)).map_or(run.material.as_str(), String::as_str);
+                        let Some(placement) = self.renderer.material_placements.get(key) else { continue };
+                        let error = *placement == Placement::Error;
+                        if !error && !self.renderer.shaders.settings(key).is_none_or(|settings| settings.casts_shadows) {
+                            continue;
+                        }
+                        // Its texture - the material's own, else the mesh's.
+                        let own_texture = self.renderer.shaders.instance_texture(key).and_then(|path| self.assets.textures.get(path)).filter(|_| !error);
+                        let texture = own_texture.map_or(&model_data.model.materials[mesh.material].bind_group, |texture| &texture.bind_group);
+                        let (pipeline, group0) = match self.renderer.shaders.shadow_pipeline(key).filter(|_| !error) {
+                            Some(pipeline) => {
+                                let group0 = if self.renderer.shaders.has_group0(key) {
+                                    let Some(group0) = self.renderer.shaders.group0(key, model_ref, mesh.material) else { continue };
+                                    group0
+                                } else {
+                                    texture
+                                };
+                                (pipeline, group0)
+                            }
+                            None if cutout => (&shadows.cutout_pipeline, texture),
+                            None => (&shadows.depth_pipeline, texture),
+                        };
+                        if !bound.is_some_and(|bound| std::ptr::eq(bound, pipeline)) {
+                            render_pass.set_pipeline(pipeline);
+                            bound = Some(pipeline);
+                        }
+                        render_pass.set_bind_group(0, group0, &[]);
+                        render_pass.set_bind_group(2, &mesh.transform_bind_group, &[]);
+                        render_pass.draw_indexed(mesh.first_index..mesh.first_index + mesh.num_elements, mesh.base_vertex, run.instances.clone());
+                    }
+                }
+            }
+        }
+    }
+
     /// What the scene pass `pass` has this frame: whether `draw_materials`
     /// would draw anything in it, and whether anything it draws reads the
     /// depth so far (see ShaderLibrary::reads_depth) - the same walk, stopping
@@ -531,12 +674,12 @@ impl App {
 
     // Physics debug lines and UI/text share this pass since they're both drawn on top,
     // without a depth buffer, gated on there being UI geometry to draw at all.
-    // `which` splits the main layer from the always-on-top one (see UiLayer).
+    // `which` splits the main layer from the always-on-top one (see UiPass).
     // `frame` is the texture behind `view`, when it's the screen: with an
     // always-on-top layer to draw (a modal), what's been drawn so far - world
     // and HUD - is copied and blurred first, so that layer's blur shows the
     // HUD behind it instead of painting the bare world over it.
-    fn render_ui_pass(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, which: UiLayer, frame: Option<&wgpu::Texture>) {
+    fn render_ui_pass(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, which: UiPass, frame: Option<&wgpu::Texture>) {
         if self.ui.ui_rendering.num_indices == 0 && self.ui.image_draws.is_empty() {
             return;
         }
@@ -544,25 +687,25 @@ impl App {
         // App::prepare_ui_content) - no blurred node there, nothing to copy.
         let has_on_top = self.ui.ui_rendering.num_indices > self.ui.ui_rendering.main_index_count;
         let on_top_blurs = has_on_top && self.ui.ui_rendering.uses_blur;
-        let Some(frame) = frame.filter(|_| which != UiLayer::Main && on_top_blurs) else {
-            self.draw_ui_layers(encoder, view, which, which != UiLayer::Main, false);
+        let Some(frame) = frame.filter(|_| which != UiPass::Main && on_top_blurs) else {
+            self.draw_ui_layers(encoder, view, which, which != UiPass::Main, false);
             return;
         };
-        if which == UiLayer::All {
-            self.draw_ui_layers(encoder, view, UiLayer::Main, true, false);
+        if which == UiPass::All {
+            self.draw_ui_layers(encoder, view, UiPass::Main, true, false);
         }
         let captured = self.renderer.blur.blur_backdrop(encoder, frame);
         if !captured {
             // Can't copy the screen - the scene's blur, as before.
             self.renderer.blur.blur_scene(encoder);
         }
-        self.draw_ui_layers(encoder, view, UiLayer::OnTop, which == UiLayer::OnTop, captured);
+        self.draw_ui_layers(encoder, view, UiPass::OnTop, which == UiPass::OnTop, captured);
     }
 
     /// One render pass of the UI's `which` layer(s) - with the physics debug
     /// lines under it when `lines`, and the on-top layer's blur sampling
     /// BlurRender::backdrop when `on_top_backdrop`.
-    fn draw_ui_layers(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, which: UiLayer, lines: bool, on_top_backdrop: bool) {
+    fn draw_ui_layers(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, which: UiPass, lines: bool, on_top_backdrop: bool) {
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("UI Render Pass"),
             color_attachments: &[color_attachment(view, wgpu::LoadOp::Load)],
@@ -589,7 +732,7 @@ impl App {
         // regardless, since all text - modal's and panel's alike - drew after
         // all quads unconditionally.
         let main_index_count = self.ui.ui_rendering.main_index_count;
-        if which != UiLayer::OnTop && main_index_count > 0 {
+        if which != UiPass::OnTop && main_index_count > 0 {
             self.draw_ui_boxes(&mut render_pass, 0, main_index_count, false);
         }
 
@@ -598,7 +741,7 @@ impl App {
         // Image content today), so it renders as one batch here, same relative
         // position (after the main pass's quads, before the on-top pass) it
         // always has.
-        if which != UiLayer::OnTop && !self.ui.image_draws.is_empty() {
+        if which != UiPass::OnTop && !self.ui.image_draws.is_empty() {
             render_pass.set_vertex_buffer(0, self.ui.image_vertex_buffer.slice(..));
             render_pass.set_index_buffer(self.ui.image_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
             for draw in &self.ui.image_draws {
@@ -615,15 +758,15 @@ impl App {
         }
 
         // Render text (text renderer handles empty content gracefully)
-        if which != UiLayer::OnTop {
+        if which != UiPass::OnTop {
             self.ui.text.text_renderer.render(&self.ui.text.text_atlas, &self.renderer.glyphon.viewport, &mut render_pass).unwrap();
         }
 
-        if which != UiLayer::Main && self.ui.ui_rendering.num_indices > main_index_count {
+        if which != UiPass::Main && self.ui.ui_rendering.num_indices > main_index_count {
             self.draw_ui_boxes(&mut render_pass, main_index_count, self.ui.ui_rendering.num_indices, on_top_backdrop);
         }
 
-        if which != UiLayer::Main {
+        if which != UiPass::Main {
             self.ui.text.text_renderer_on_top.render(&self.ui.text.text_atlas, &self.renderer.glyphon.viewport, &mut render_pass).unwrap();
         }
     }
@@ -663,6 +806,9 @@ impl App {
         let mut target: Option<wgpu::TextureView> = None;
         let mut missing = Vec::new();
         let fullscreen_ready = self.place_materials(plan);
+        // The sun's shadow map, before anything reads it - once the
+        // materials are placed, which says which meshes cast.
+        self.render_shadow_pass(encoder);
         // The scene blurred for the UI's frosted panels - once, before the
         // first UI step, once the world's drawn. Only when something reads
         // it: a blurred main-layer node, or a Fullscreen shader reading
@@ -702,7 +848,8 @@ impl App {
                     }
                 }
                 FrameStep::Particles => self.render_particle_pass(encoder),
-                FrameStep::Nodes2D => self.renderer.shapes_2d.draw(encoder, view),
+                FrameStep::Nodes3D => self.render_nodes_3d(encoder, view, target.is_some()),
+                FrameStep::Nodes2D => self.render_nodes_2d(encoder, view),
                 FrameStep::Target { name, clear } => match self.renderer.targets.get(name) {
                     Some(image) => {
                         let view = image.texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -731,8 +878,8 @@ impl App {
                     let frame = if target.is_none() { Some(screen_texture) } else { None };
                     let rendering = &self.ui.ui_rendering;
                     let needs_blur = fullscreen_reads_blur
-                        || (*layer != UiLayer::OnTop && rendering.main_uses_blur)
-                        || (*layer != UiLayer::Main && rendering.uses_blur && frame.is_none());
+                        || (*layer != UiPass::OnTop && rendering.main_uses_blur)
+                        || (*layer != UiPass::Main && rendering.uses_blur && frame.is_none());
                     if needs_blur && !blurred {
                         self.renderer.blur.blur_scene(encoder);
                         blurred = true;
@@ -760,12 +907,15 @@ impl App {
     /// drawn so far: its models' edges, then - in place of the world - its
     /// depth.
     fn draw_debug_views(&mut self, encoder: &mut wgpu::CommandEncoder) {
-        let Renderer { debug, wireframe, device, blur, depth_render, camera_resources, .. } = &mut self.renderer;
+        let Renderer { debug, wireframe, device, blur, depth_render, camera_resources, shadows, config, .. } = &mut self.renderer;
         if debug.wireframe && self.scene_manager.cameras().is_some_and(|cameras| cameras.has_active_camera()) {
             wireframe.draw(device, encoder, &blur.scene_color.view, &depth_render.texture.view, &camera_resources.bind_group, &self.assets.models.drawn);
         }
         if debug.depth {
             depth_render.render(&blur.scene_color.view, encoder);
+        }
+        if debug.shadows && shadows.active {
+            shadows.draw_debug(encoder, &blur.scene_color.view, [config.width, config.height]);
         }
     }
 
@@ -844,12 +994,12 @@ impl App {
     }
 }
 
-/// Which slice of the UI a step draws: all of it, the main layer (every
-/// node but the always-on-top ones), or the always-on-top layer (with the
-/// physics debug lines) - so a frame plan can put something between them,
+/// Which slice of the UI a step draws: all of it, the main pass (everything
+/// under the lowest blocking layer - see `App::prepare_ui_content`), or the
+/// on-top pass (with the physics debug lines) - so a frame plan can put something between them,
 /// like the play scene's G-force effects over its HUD but under its menus.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum UiLayer {
+pub enum UiPass {
     All,
     Main,
     OnTop,
@@ -882,4 +1032,26 @@ mod tests {
         assert_ne!(step_hash(&FrameStep::Particles), step_hash(&FrameStep::Nodes2D));
         assert_ne!(step_hash(&FrameStep::Target { name: "hud".into(), clear: true }), step_hash(&FrameStep::Target { name: "hud".into(), clear: false }));
     }
+}
+
+/// `material`'s params with the floating origin's offset added, for a
+/// texture tiled in the world (engine/tiled, see `Material::tiled`): where
+/// the scene's (0, 0, 0) is in the world, modulo the tile size - None (its
+/// own params as they are) for any other material, or while that offset is
+/// zero.
+fn origin_params(material: &crate::scene_manager::node::properties::Material, origin: &crate::world_origin::WorldOrigin) -> Option<std::collections::BTreeMap<String, crate::rendering::shader_library::ParamValue>> {
+    if material.shader != crate::rendering::shader_library::TILED {
+        return None;
+    }
+    let first = |name: &str| material.params.get(name).and_then(|value| value.0.first().copied());
+    if first("world").is_none_or(|world| world <= 0.5) {
+        return None;
+    }
+    let offset = origin.wrapped(first("tile_size")?);
+    if offset == nalgebra::Vector3::zeros() {
+        return None;
+    }
+    let mut params = material.params.clone();
+    params.insert("origin_offset".to_owned(), [offset.x, offset.y, offset.z].into());
+    Some(params)
 }

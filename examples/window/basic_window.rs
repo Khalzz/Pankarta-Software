@@ -3,33 +3,44 @@
 //! cargo run --example basic_window
 
 use pankarta_software::app::App;
-use pankarta_software::ui::layer::Layer;
-use pankarta_software::rendering::ui::ui::Ui;
+use pankarta_software::prelude::*;
+use pankarta_software::ui::ui_node::UiNode;
 use pankarta_software::ui::ui_transform::SizeValue;
 use pankarta_software::ui::widgets::text;
 use pankarta_software::ui::TextStyle;
-use pankarta_software::scene_manager::scene::SceneBehaviour;
 
 /// A scene with nothing in it but a frame rate counter.
+struct EmptyScene;
+
+impl SceneBehaviour for EmptyScene {
+    fn on_spawn(&mut self, scene: &mut Scene, app: &mut App) {
+        // Wide enough for any frame rate - it's sized to its first text otherwise.
+        let framerate_label = text("600 fps", &TextStyle::default())
+            .set_padding((10.0, 10.0))
+            .set_size(SizeValue::Pixels(200.0), SizeValue::Fit);
+
+        // The counter is a node: its UI is its UiLayer, its behavior keeps
+        // the text up to date.
+        let counter = Node::new("framerate")
+            .with_property(UiLayer::new(UiNode::container().set_child("label", framerate_label)))
+            .with_behavior(FrameRate::default());
+        if let Err(error) = scene.spawn_node(app, counter) {
+            eprintln!("{error}");
+        }
+    }
+}
+
+/// Shows the frame rate in its node's UI.
 #[derive(Default)]
-struct EmptyScene {
+struct FrameRate {
     // Frames and seconds since the counter last changed - it shows their
     // average, twice a second, instead of a number too jumpy to read.
     frames: u32,
     elapsed: f32,
 }
 
-impl SceneBehaviour for EmptyScene {
-    fn on_spawn(&mut self, _scene: &mut pankarta_software::prelude::Scene, app: &mut App) {
-        // Wide enough for any frame rate - it's sized to its first text otherwise.
-        let framerate_label = text(app, "600 fps", &TextStyle::default())
-            .set_padding((10.0, 10.0))
-            .set_size(SizeValue::Pixels(200.0), SizeValue::Fit);
-
-        Layer::new(app).set_child("framerate", framerate_label).build(app);
-    }
-
-    fn update(&mut self, _scene: &mut pankarta_software::prelude::Scene, app: &mut App, _ctx: &mut pankarta_software::prelude::FrameContext) {
+impl Behavior for FrameRate {
+    fn update(&mut self, node: &mut Node, _scene: &mut SceneAccess, app: &mut App) {
         self.frames += 1;
         self.elapsed += app.time.unscaled_delta_time;
         if self.elapsed < 0.5 {
@@ -39,10 +50,8 @@ impl SceneBehaviour for EmptyScene {
         self.frames = 0;
         self.elapsed = 0.0;
 
-        // The label is UI, not a node - found in app.ui by the name the
-        // Layer gave it.
-        if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "framerate").and_then(|node| node.as_label_mut()) {
-            label.set_text(&mut app.ui.text.font_system, &format!("{fps:.0} fps"), true);
+        if let Some(label) = node.get_property_mut::<UiLayer>().and_then(|ui| ui.label_mut("label")) {
+            label.set_text(format!("{fps:.0} fps"));
         }
     }
 }
@@ -58,7 +67,7 @@ async fn main() {
         }
     };
 
-    app.scene_manager.create_scene("main", |_scene, _app| EmptyScene::default());
+    app.scene_manager.create_scene("main", |_scene, _app| EmptyScene);
     app.scene_manager.open_scene("main");
 
     app.run();

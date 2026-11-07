@@ -10,6 +10,7 @@
 //! drawn last is on top. Optionally only inside a convex outline on screen
 //! (`mask` - see `convex_mask`), e.g. the cockpit's HUD glass.
 
+use nalgebra::Vector3;
 use wgpu::util::DeviceExt;
 
 use crate::scene_manager::node::properties::Material;
@@ -77,6 +78,9 @@ pub struct ThickLines {
     uniform_bind_group: wgpu::BindGroup,
     /// Uploaded once by `set_static` - drawn first.
     static_buffer: Option<(wgpu::Buffer, u32)>,
+    /// What `static_buffer` holds - kept to upload it again moved, when the
+    /// floating origin moves the world (see `shift_origin`).
+    static_lines: Vec<LineInstance>,
     /// Refilled every frame by whoever draws with it - drawn after the
     /// static set, in order.
     pub dynamic: Vec<LineInstance>,
@@ -147,6 +151,7 @@ impl ThickLines {
             uniform_buffer,
             uniform_bind_group,
             static_buffer: None,
+            static_lines: Vec::new(),
             dynamic: Vec::new(),
             dynamic_buffer: None,
             mask: None,
@@ -162,6 +167,7 @@ impl ThickLines {
     /// Replaces the static set - drawn every time, under `dynamic`. Empty
     /// clears it.
     pub fn set_static(&mut self, device: &wgpu::Device, lines: &[LineInstance]) {
+        self.static_lines = lines.to_vec();
         self.static_buffer = (!lines.is_empty()).then(|| {
             let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("Thick lines static"),
@@ -172,6 +178,26 @@ impl ThickLines {
         });
     }
 
+    /// Moves every line by `shift` - the static set (uploaded again) and
+    /// `dynamic` - for the floating origin (see `WorldOrigin`). Lines in
+    /// screen pixels stay.
+    pub(crate) fn shift_origin(&mut self, device: &wgpu::Device, shift: Vector3<f32>) {
+        if self.screen_space {
+            return;
+        }
+        let moved = |line: &mut LineInstance| {
+            for point in [&mut line.start, &mut line.end] {
+                *point = (Vector3::from(*point) + shift).into();
+            }
+        };
+        self.dynamic.iter_mut().for_each(moved);
+        if !self.static_lines.is_empty() {
+            let mut lines = std::mem::take(&mut self.static_lines);
+            lines.iter_mut().for_each(moved);
+            self.set_static(device, &lines);
+        }
+    }
+
     /// Draws the static set, then `dynamic`, into `render_pass` with its
     /// material (`material`: its pipeline and bind group 0 - see
     /// ShaderLibrary::overlay) - seen from the camera at world
@@ -179,6 +205,41 @@ impl ThickLines {
     /// a screen `screen` pixels big, with the light's bind group `light`.
     #[allow(clippy::too_many_arguments)]
     pub fn draw(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, render_pass: &mut wgpu::RenderPass<'_>, material: (&wgpu::RenderPipeline, &wgpu::BindGroup), camera_bind_group: &wgpu::BindGroup, light: &wgpu::BindGroup, camera_position: [f32; 3], screen: [f32; 2]) {
+        self.prepare(device, queue, camera_position, screen);
+        self.bind(render_pass, material, camera_bind_group, light);
+        if let Some((buffer, count)) = &self.static_buffer {
+            render_pass.set_vertex_buffer(0, buffer.slice(..));
+            render_pass.draw(0..6, 0..*count);
+        }
+        if let (Some((buffer, _)), false) = (&self.dynamic_buffer, self.dynamic.is_empty()) {
+            render_pass.set_vertex_buffer(0, buffer.slice(..));
+            render_pass.draw(0..6, 0..self.dynamic.len() as u32);
+        }
+    }
+
+    /// Draws `range` of `dynamic` (see `draw`), once `prepare` has run this
+    /// frame - for a set drawn a part at a time.
+    pub(crate) fn draw_range(&self, render_pass: &mut wgpu::RenderPass<'_>, material: (&wgpu::RenderPipeline, &wgpu::BindGroup), camera_bind_group: &wgpu::BindGroup, light: &wgpu::BindGroup, range: std::ops::Range<u32>) {
+        let Some((buffer, _)) = &self.dynamic_buffer else { return };
+        if range.is_empty() {
+            return;
+        }
+        self.bind(render_pass, material, camera_bind_group, light);
+        render_pass.set_vertex_buffer(0, buffer.slice(..));
+        render_pass.draw(0..6, range);
+    }
+
+    fn bind(&self, render_pass: &mut wgpu::RenderPass<'_>, material: (&wgpu::RenderPipeline, &wgpu::BindGroup), camera_bind_group: &wgpu::BindGroup, light: &wgpu::BindGroup) {
+        render_pass.set_pipeline(material.0);
+        render_pass.set_bind_group(0, material.1, &[]);
+        render_pass.set_bind_group(1, camera_bind_group, &[]);
+        render_pass.set_bind_group(2, &self.uniform_bind_group, &[]);
+        render_pass.set_bind_group(3, light, &[]);
+    }
+
+    /// Writes its uniform and `dynamic` to the GPU - see `draw` for what the
+    /// arguments are.
+    pub(crate) fn prepare(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, camera_position: [f32; 3], screen: [f32; 2]) {
         let mut mask = [[0.0; 4]; MAX_MASK_EDGES];
         let edges = self.mask.as_deref().unwrap_or_default();
         for (slot, edge) in mask.iter_mut().zip(edges) {
@@ -208,20 +269,6 @@ impl ThickLines {
             if let Some((buffer, _)) = &self.dynamic_buffer {
                 queue.write_buffer(buffer, 0, bytemuck::cast_slice(&self.dynamic));
             }
-        }
-
-        render_pass.set_pipeline(material.0);
-        render_pass.set_bind_group(0, material.1, &[]);
-        render_pass.set_bind_group(1, camera_bind_group, &[]);
-        render_pass.set_bind_group(2, &self.uniform_bind_group, &[]);
-        render_pass.set_bind_group(3, light, &[]);
-        if let Some((buffer, count)) = &self.static_buffer {
-            render_pass.set_vertex_buffer(0, buffer.slice(..));
-            render_pass.draw(0..6, 0..*count);
-        }
-        if let (Some((buffer, _)), false) = (&self.dynamic_buffer, self.dynamic.is_empty()) {
-            render_pass.set_vertex_buffer(0, buffer.slice(..));
-            render_pass.draw(0..6, 0..self.dynamic.len() as u32);
         }
     }
 }

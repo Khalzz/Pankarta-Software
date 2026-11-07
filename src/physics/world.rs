@@ -251,6 +251,30 @@ impl PhysicsWorld {
         self.bodies.remove(handle, &mut self.islands, &mut self.colliders, &mut self.impulse_joints, &mut self.multibody_joints, true);
     }
 
+    /// Moves every body and collider by `shift` - static ones too - for the
+    /// floating origin (see `WorldOrigin`). Velocities, contacts and joints
+    /// are relative, so they carry on as they were; where a moving body was
+    /// before the last step moves too, so it isn't drawn sliding across the
+    /// shift. Rays cast right after already see the moved world.
+    ///
+    /// The next step works out which colliders are near which again, for
+    /// all of them - about what the scene's first step costs.
+    pub(crate) fn shift_origin(&mut self, shift: Vector3<f32>) {
+        for (_, body) in self.bodies.iter_mut() {
+            let translation = *body.translation() + shift;
+            body.set_translation(translation, false);
+        }
+        for (_, collider) in self.colliders.iter_mut().filter(|(_, collider)| collider.parent().is_none()) {
+            let translation = collider.translation() + shift;
+            collider.set_translation(translation);
+        }
+        for previous in self.previous.values_mut() {
+            previous.translation.vector += shift;
+        }
+        self.bodies.propagate_modified_body_positions_to_colliders(&mut self.colliders);
+        self.query.update(&self.colliders);
+    }
+
     /// Adds a frame's `elapsed` (scaled) seconds, and says how many steps
     /// are due now.
     pub(crate) fn steps_due(&mut self, elapsed: f32, debug_view: bool) -> u32 {

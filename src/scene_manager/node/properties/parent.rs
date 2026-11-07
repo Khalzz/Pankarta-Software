@@ -1,4 +1,4 @@
-use super::transform::Transform3D;
+use super::transform::{Transform2D, Transform3D};
 
 /// How a child node's position is given - see `Parent`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -26,11 +26,15 @@ pub enum Space {
 ///
 /// A child with a `Physics` body isn't moved by its parent - the physics
 /// does that.
+///
+/// A 2D child of a 2D parent works the same with `Transform2D` and
+/// `local_2d`; given no transform at all, a child of a 2D parent is 2D.
 #[derive(Debug, Clone)]
 pub struct Parent {
     pub id: String,
     pub space: Space,
     pub local: Transform3D,
+    pub local_2d: Transform2D,
     /// A `Local` child turns with the parent - off: it only follows its
     /// position, keeping its own rotation (a chase camera that shouldn't
     /// roll with the plane).

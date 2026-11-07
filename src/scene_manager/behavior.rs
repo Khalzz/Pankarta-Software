@@ -1,5 +1,7 @@
 use std::any::Any;
 
+use nalgebra::Vector3;
+
 use crate::app::App;
 use super::node::Node;
 use super::scene_access::SceneAccess;
@@ -76,5 +78,14 @@ pub trait Behavior: Any + AsAny {
     /// is where it really is now.
     fn fixed_update(&mut self, node: &mut Node, scene: &mut SceneAccess, app: &mut App) {
         let _ = (node, scene, app);
+    }
+
+    /// Runs when the floating origin moved the whole world (see
+    /// `WorldOrigin`, `app.origin`): what was at local `p` is at
+    /// `p + shift` now. The engine has moved every node, body, camera and
+    /// particle already - move the world positions this behavior keeps in
+    /// its own fields (a patrol route, a target point) the same way.
+    fn on_origin_shift(&mut self, node: &mut Node, scene: &mut SceneAccess, app: &mut App, shift: Vector3<f32>) {
+        let _ = (node, scene, app, shift);
     }
 }

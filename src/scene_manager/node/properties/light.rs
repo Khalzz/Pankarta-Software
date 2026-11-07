@@ -17,6 +17,9 @@ pub struct Light {
     /// How bright - multiplies `color`. 1 by default, more for a brighter
     /// light.
     pub intensity: f32,
+    /// Whether it casts shadows - on by default. How they look is the
+    /// renderer's, for every light (see Renderer::set_shadows).
+    pub shadows: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,11 +32,16 @@ pub enum LightKind {
 impl Light {
     /// A sun of `color`.
     pub fn directional(color: [f32; 3]) -> Self {
-        Self { kind: LightKind::Directional, color, intensity: 1.0 }
+        Self { kind: LightKind::Directional, color, intensity: 1.0, shadows: true }
     }
 
     pub fn intensity(mut self, intensity: f32) -> Self {
         self.intensity = intensity;
+        self
+    }
+
+    pub fn shadows(mut self, shadows: bool) -> Self {
+        self.shadows = shadows;
         self
     }
 

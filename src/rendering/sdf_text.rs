@@ -276,6 +276,17 @@ impl SdfText {
         }
     }
 
+    /// Moves the text pushed so far by `shift`, for the floating origin (see
+    /// `WorldOrigin`). Text in screen pixels stays.
+    pub(crate) fn shift_origin(&mut self, shift: Vector3<f32>) {
+        if self.screen_space {
+            return;
+        }
+        for glyph in &mut self.instances {
+            glyph.origin = (Vector3::from(glyph.origin) + shift).into();
+        }
+    }
+
     /// Drops everything pushed - call before pushing a new frame's text.
     pub fn clear(&mut self) {
         self.instances.clear();
@@ -287,8 +298,14 @@ impl SdfText {
 
     /// Adds `text` in `font`, centered on `frame` (see `TextFrame`), in
     /// `color` (sRGB RGBA 0..1, like the UI's colors; alpha blends) - drawn
-    /// at the next `draw`.
-    pub fn push(&mut self, font_system: &mut FontSystem, text: &str, font: Font, frame: TextFrame, color: [f32; 4]) {
+    /// at the next `draw`. Shaped with the engine's font system (see
+    /// `rendering::ui::ui::font_system`).
+    pub fn push(&mut self, text: &str, font: Font, frame: TextFrame, color: [f32; 4]) {
+        self.push_with(&mut crate::rendering::ui::ui::font_system(), text, font, frame, color);
+    }
+
+    /// `push`, with the font system already in hand.
+    pub(crate) fn push_with(&mut self, font_system: &mut FontSystem, text: &str, font: Font, frame: TextFrame, color: [f32; 4]) {
         if text.is_empty() {
             return;
         }
@@ -395,6 +412,34 @@ impl SdfText {
     /// big, with the light's bind group `light`.
     #[allow(clippy::too_many_arguments)]
     pub fn draw(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, render_pass: &mut wgpu::RenderPass<'_>, material: (&wgpu::RenderPipeline, &wgpu::BindGroup), camera_bind_group: &wgpu::BindGroup, light: &wgpu::BindGroup, camera_position: [f32; 3], screen: [f32; 2]) {
+        self.prepare(device, queue, camera_position, screen);
+        self.draw_range(render_pass, material, camera_bind_group, light, 0..self.instance_count());
+    }
+
+    /// How many glyphs were pushed - `draw_range`'s instances.
+    pub(crate) fn instance_count(&self) -> u32 {
+        self.instances.len() as u32
+    }
+
+    /// Draws `range` of the glyphs pushed (see `draw`), once `prepare` has
+    /// run this frame - for a set drawn a part at a time.
+    pub(crate) fn draw_range(&self, render_pass: &mut wgpu::RenderPass<'_>, material: (&wgpu::RenderPipeline, &wgpu::BindGroup), camera_bind_group: &wgpu::BindGroup, light: &wgpu::BindGroup, range: std::ops::Range<u32>) {
+        let Some((buffer, _)) = &self.instance_buffer else { return };
+        if range.is_empty() {
+            return;
+        }
+        render_pass.set_pipeline(material.0);
+        render_pass.set_bind_group(0, material.1, &[]);
+        render_pass.set_bind_group(1, camera_bind_group, &[]);
+        render_pass.set_bind_group(2, &self.bind_group, &[]);
+        render_pass.set_bind_group(3, light, &[]);
+        render_pass.set_vertex_buffer(0, buffer.slice(..));
+        render_pass.draw(0..6, range);
+    }
+
+    /// Writes new glyphs to the atlas, and its uniform and what was pushed to
+    /// the GPU - see `draw` for what the arguments are.
+    pub(crate) fn prepare(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, camera_position: [f32; 3], screen: [f32; 2]) {
         for (x, y, width, height, texels) in self.uploads.drain(..) {
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo { texture: &self.atlas, mip_level: 0, origin: wgpu::Origin3d { x, y, z: 0 }, aspect: wgpu::TextureAspect::All },
@@ -433,14 +478,6 @@ impl SdfText {
         }
         let Some((buffer, _)) = &self.instance_buffer else { return };
         queue.write_buffer(buffer, 0, bytemuck::cast_slice(&self.instances));
-
-        render_pass.set_pipeline(material.0);
-        render_pass.set_bind_group(0, material.1, &[]);
-        render_pass.set_bind_group(1, camera_bind_group, &[]);
-        render_pass.set_bind_group(2, &self.bind_group, &[]);
-        render_pass.set_bind_group(3, light, &[]);
-        render_pass.set_vertex_buffer(0, buffer.slice(..));
-        render_pass.draw(0..6, 0..needed as u32);
     }
 }
 

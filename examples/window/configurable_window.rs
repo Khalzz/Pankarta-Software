@@ -13,25 +13,26 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use pankarta_software::app::App;
+use pankarta_software::prelude::{Node, UiLayer};
 use pankarta_software::rendering::graphics_backend::GraphicsBackend;
-use pankarta_software::rendering::ui::ui::Ui;
 use pankarta_software::scene_manager::scene::{FrameContext, Scene, SceneBehaviour};
 use pankarta_software::ui::color::UiColor;
-use pankarta_software::ui::layer::Layer;
 use pankarta_software::ui::ui_node::UiNode;
 use pankarta_software::ui::ui_transform::{Anchor, Orientation, PositionValue, SizeValue};
 use pankarta_software::ui::widgets::{button, card, dropdown, text, toggle, ButtonStyle, CardStyle, DropdownStyle, ToggleStyle};
 use pankarta_software::ui::{Align, TextStyle, UiScaling, Weight};
-use pankarta_software::window::window::WindowMode;
+use pankarta_software::window::WindowMode;
 
-// Where the values are in the UI tree - each setting row holds its control
-// under "control" (see `setting_row`).
-const RESOLUTION_VALUE: &str = "settings/resolution/control/value";
-const RESOLUTION_BACK: &str = "settings/resolution/control/back";
-const RESOLUTION_AHEAD: &str = "settings/resolution/control/ahead";
-const FPS_VALUE: &str = "settings/fps/value";
-const APPLY_BUTTON: &str = "settings/apply";
-const NOTE: &str = "settings/note";
+/// The node whose `UiLayer` is the settings panel.
+const PANEL: &str = "settings";
+// Where the values are in the panel's layer - each setting row holds its
+// control under "control" (see `setting_row`).
+const RESOLUTION_VALUE: &str = "resolution/control/value";
+const RESOLUTION_BACK: &str = "resolution/control/back";
+const RESOLUTION_AHEAD: &str = "resolution/control/ahead";
+const FPS_VALUE: &str = "fps/value";
+const APPLY_BUTTON: &str = "apply";
+const NOTE: &str = "note";
 
 /// Where the chosen backend is kept between launches.
 const BACKEND_FILE: &str = "settings/configurable_window_backend.txt";
@@ -87,12 +88,12 @@ fn body() -> TextStyle {
 }
 
 /// One setting: its name on the left, its control after it.
-fn setting_row(app: &mut App, name: &str, control: UiNode) -> UiNode {
+fn setting_row(name: &str, control: UiNode) -> UiNode {
     UiNode::container()
         .set_orientation(Orientation::Horizontal)
         .set_child_anchor(Anchor::Start, Anchor::Center)
         .set_gap(8.0)
-        .set_child("name", text(app, name, &body()).set_size(SizeValue::Pixels(NAME_WIDTH), SizeValue::Fit))
+        .set_child("name", text(name, &body()).set_size(SizeValue::Pixels(NAME_WIDTH), SizeValue::Fit))
         .set_child("control", control)
 }
 
@@ -103,7 +104,7 @@ struct ConfigurableWindow {
 impl ConfigurableWindow {
     /// `launched_with`: the backend the app was started with; `backends`: the
     /// ones this machine can use (see `main`).
-    fn new(app: &mut App, launched_with: GraphicsBackend, backends: Vec<GraphicsBackend>) -> Self {
+    fn new(scene: &mut Scene, app: &mut App, launched_with: GraphicsBackend, backends: Vec<GraphicsBackend>) -> Self {
         // Only the screen's 16:9 resolutions - all of them if it has none.
         let all = app.window.available_resolutions();
         let wide: Vec<(u32, u32)> = all.iter().copied().filter(|&size| is_16_9(size)).collect();
@@ -121,8 +122,8 @@ impl ConfigurableWindow {
         let names: Vec<&str> = WINDOW_MODES.iter().map(|(name, _)| *name).collect();
         let mode = {
             let settings = Rc::clone(&settings);
-            dropdown(app, &names, current.mode, &DropdownStyle::default().width(CONTROL_WIDTH))
-                .on_select(move |_, index| settings.borrow_mut().pending.mode = index)
+            dropdown(&names, current.mode, &DropdownStyle::default().width(CONTROL_WIDTH))
+                .on_select(move |_node, _scene, _app, index| settings.borrow_mut().pending.mode = index)
         };
 
         let arrow = ButtonStyle::default().width(28.0);
@@ -133,53 +134,55 @@ impl ConfigurableWindow {
             .set_gap(6.0)
             // The list is biggest first - [<] goes down it, [>] up. Each is
             // disabled at its end of the list (see `update`).
-            .set_child("back", button(app, "<", &arrow).on_click(move |_| step_resolution(&smaller, 1)))
-            .set_child("value", text(app, "-", &body().align(Align::Center)).set_size(SizeValue::Pixels(120.0), SizeValue::Fit))
-            .set_child("ahead", button(app, ">", &arrow).on_click(move |_| step_resolution(&bigger, -1)));
+            .set_child("back", button("<", &arrow).on_click(move |_node, _scene, _app| step_resolution(&smaller, 1)))
+            .set_child("value", text("-", &body().align(Align::Center)).set_size(SizeValue::Pixels(120.0), SizeValue::Fit))
+            .set_child("ahead", button(">", &arrow).on_click(move |_node, _scene, _app| step_resolution(&bigger, -1)));
 
         let vsync = {
             let settings = Rc::clone(&settings);
             toggle(current.vsync, &ToggleStyle::default())
-                .on_toggle(move |_, on| settings.borrow_mut().pending.vsync = on)
+                .on_toggle(move |_node, _scene, _app, on| settings.borrow_mut().pending.vsync = on)
         };
 
         let backend = {
             let settings = Rc::clone(&settings);
-            dropdown(app, &backend_names, current.backend, &DropdownStyle::default().width(CONTROL_WIDTH))
-                .on_select(move |_, index| settings.borrow_mut().pending.backend = index)
+            dropdown(&backend_names, current.backend, &DropdownStyle::default().width(CONTROL_WIDTH))
+                .on_select(move |_node, _scene, _app, index| settings.borrow_mut().pending.backend = index)
         };
 
-        let fps = text(app, "-", &body()).set_size(SizeValue::Pixels(80.0), SizeValue::Fit);
+        let fps = text("-", &body()).set_size(SizeValue::Pixels(80.0), SizeValue::Fit);
         // Which backend is drawing, or which one waits for the next start.
-        let note = text(app, "-", &body().size(13.0).color(UiColor::Rgb(170, 170, 170)))
+        let note = text("-", &body().size(13.0).color(UiColor::Rgb(170, 170, 170)))
             .set_size(SizeValue::Pixels(NAME_WIDTH + 8.0 + CONTROL_WIDTH), SizeValue::Fit);
 
         // Disabled while there's nothing to apply (see `update`).
         let apply = {
             let settings = Rc::clone(&settings);
-            button(app, "Apply", &ButtonStyle::default().width(NAME_WIDTH + 8.0 + CONTROL_WIDTH))
-                .on_click(move |app| apply(app, &settings))
+            button("Apply", &ButtonStyle::default().width(NAME_WIDTH + 8.0 + CONTROL_WIDTH))
+                .on_click(move |_node, _scene, app| apply(app, &settings))
                 .enabled(false)
         };
 
         let heading = TextStyle::default().size(20.0).weight(Weight::BOLD);
         let settings_panel = card(&CardStyle::default().gap(12.0).padding(20.0))
             .set_position(PositionValue::Center(0.0), PositionValue::Center(0.0))
-            .set_child("title", text(app, "Window", &heading))
-            .set_child("mode", setting_row(app, "Mode", mode))
-            .set_child("resolution", setting_row(app, "Resolution", resolution))
-            .set_child("vsync", setting_row(app, "VSync", vsync))
-            .set_child("backend", setting_row(app, "Backend", backend))
+            .set_child("title", text("Window", &heading))
+            .set_child("mode", setting_row("Mode", mode))
+            .set_child("resolution", setting_row("Resolution", resolution))
+            .set_child("vsync", setting_row("VSync", vsync))
+            .set_child("backend", setting_row("Backend", backend))
             .set_child("fps", UiNode::container()
                 .set_orientation(Orientation::Horizontal)
                 .set_child_anchor(Anchor::Start, Anchor::Center)
                 .set_gap(8.0)
-                .set_child("name", text(app, "FPS", &body().color(UiColor::Rgb(170, 170, 170))).set_size(SizeValue::Pixels(NAME_WIDTH), SizeValue::Fit))
+                .set_child("name", text("FPS", &body().color(UiColor::Rgb(170, 170, 170))).set_size(SizeValue::Pixels(NAME_WIDTH), SizeValue::Fit))
                 .set_child("value", fps))
             .set_child("note", note)
             .set_child("apply", apply);
 
-        Layer::new(app).set_child("settings", settings_panel).build(app);
+        if let Err(error) = scene.spawn_node(app, Node::new(PANEL).with_property(UiLayer::new(settings_panel))) {
+            eprintln!("{error}");
+        }
         ConfigurableWindow { settings }
     }
 }
@@ -187,7 +190,7 @@ impl ConfigurableWindow {
 impl SceneBehaviour for ConfigurableWindow {
     // What's shown, every frame: the frame rate, the pending resolution,
     // which arrows can still move, and whether Apply has anything to do.
-    fn update(&mut self, _scene: &mut Scene, app: &mut App, _ctx: &mut FrameContext) {
+    fn update(&mut self, scene: &mut Scene, app: &mut App, _ctx: &mut FrameContext) {
         let settings = self.settings.borrow();
         let fps = format!("{:.0}", app.time.fps());
         let resolution = match settings.resolutions.get(settings.pending.resolution) {
@@ -201,27 +204,28 @@ impl SceneBehaviour for ConfigurableWindow {
             format!("Drawing with {}", app.renderer.backend())
         };
 
-        let font_system = &mut app.ui.text.font_system;
-        let elements = &mut app.ui.renderizable_elements;
-        if let Some(label) = Ui::get_ui_node(elements, FPS_VALUE).and_then(|node| node.as_label_mut()) {
-            label.set_text(font_system, &fps, false);
+        let Some(panel) = scene.get_node_mut(PANEL).and_then(|node| node.get_property_mut::<UiLayer>()) else {
+            return;
+        };
+        if let Some(label) = panel.label_mut(FPS_VALUE) {
+            label.set_text(&fps);
         }
-        if let Some(label) = Ui::get_ui_node(elements, RESOLUTION_VALUE).and_then(|node| node.as_label_mut()) {
-            label.set_text(font_system, &resolution, true);
+        if let Some(label) = panel.label_mut(RESOLUTION_VALUE) {
+            label.set_text(&resolution);
         }
-        if let Some(label) = Ui::get_ui_node(elements, NOTE).and_then(|node| node.as_label_mut()) {
-            label.set_text(font_system, &note, false);
+        if let Some(label) = panel.label_mut(NOTE) {
+            label.set_text(&note);
         }
-        if let Some(apply) = Ui::get_ui_node(elements, APPLY_BUTTON) {
+        if let Some(apply) = panel.get_mut(APPLY_BUTTON) {
             apply.set_enabled(settings.changed());
         }
         // The list is biggest first: [<] stops at its last (the smallest),
         // [>] at its first (the biggest).
         let last = settings.resolutions.len().saturating_sub(1);
-        if let Some(back) = Ui::get_ui_node(elements, RESOLUTION_BACK) {
+        if let Some(back) = panel.get_mut(RESOLUTION_BACK) {
             back.set_enabled(settings.pending.resolution < last);
         }
-        if let Some(ahead) = Ui::get_ui_node(elements, RESOLUTION_AHEAD) {
+        if let Some(ahead) = panel.get_mut(RESOLUTION_AHEAD) {
             ahead.set_enabled(settings.pending.resolution > 0);
         }
     }
@@ -331,7 +335,7 @@ async fn main() {
         eprintln!("Couldn't set the size: {err}");
     }
 
-    app.scene_manager.create_scene("main", move |_scene, app| ConfigurableWindow::new(app, launched_with, backends.clone()));
+    app.scene_manager.create_scene("main", move |scene, app| ConfigurableWindow::new(scene, app, launched_with, backends.clone()));
     app.scene_manager.open_scene("main");
 
     app.run();

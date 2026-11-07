@@ -1,88 +1,186 @@
+use std::borrow::Cow;
+
 use nalgebra::Vector3;
 
-use crate::asset_manager::AssetManager;
-use crate::resources::{self, DoubleSidedMeshes, ModelLoad, ModelSource};
+use crate::asset_manager::models::{DoubleSidedMeshes, ModelSource};
+use crate::asset_manager::normalize;
 
-/// A `Node` property: the model it draws, and that model's own `scale`.
+use super::material::Material;
+use super::mesh::Mesh;
+use super::transform::Transform3D;
+
+/// A 3D object made of named parts: the meshes of a file, the meshes it was
+/// given, or both.
 ///
-/// Where the model comes from is its `source` - a file in the assets folder
-/// (`Model::new(ModelSource::file("models/f16.glb"))`), a mesh the game made
-/// (`ModelSource::mesh`, see `AssetManager::add_mesh`), or one of the
-/// engine's shapes (`ModelSource::Cube`, `ModelSource::Plane`). Whichever it
-/// is, it's loaded with the scene that uses it, before that scene starts
-/// (see `Scene::assets_to_load`), and shared by every node using the same.
+///     Node::new("jet").with_property(Model::file("models/f16.glb"))
 ///
-/// `scale` is how big the model is drawn, separate from the node's own
-/// `Transform3D::scale`. The drawn size is node scale x model scale, so a
-/// model authored at 1 unit long can be `.scaled(14.0)` on a node whose own
-/// scale stays 1 (see `Model::render_scale`).
+///     Node::new("tank").with_property(Model::new()
+///         .part("body", Mesh::cube())
+///         .part("turret", Mesh::cylinder(0.8, 0.6).transform(Transform3D { position: Vector3::y(), ..Default::default() })))
+///
+/// `transform` places the whole model relative to its node; a part's own
+/// `transform` places it within the model. See docs/meshes_and_models.md.
 #[derive(Debug, Clone)]
 pub struct Model {
-    pub source: ModelSource,
-    pub scale: Vector3<f32>,
-    /// See `double_sided`.
+    file: Option<String>,
+    parts: Vec<(String, Mesh)>,
+    /// The file's meshes' materials, by the mesh's name in the file.
+    file_materials: Vec<(String, Material)>,
+    pub transform: Transform3D,
+    /// Every part without its own material uses this.
+    pub material: Option<Material>,
+    pub casts_shadows: bool,
+    pub receives_shadows: bool,
     double_sided: DoubleSidedMeshes,
-    /// See `variant`.
     variant: Option<String>,
 }
 
+impl Default for Model {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Model {
-    /// The model `source` gives, at its own size (scale 1).
-    pub fn new(source: ModelSource) -> Self {
-        Self { source, scale: Vector3::new(1.0, 1.0, 1.0), double_sided: DoubleSidedMeshes::None, variant: None }
+    /// A model with no parts yet - give it some with `part`.
+    pub fn new() -> Self {
+        Self {
+            file: None,
+            parts: Vec::new(),
+            file_materials: Vec::new(),
+            transform: Transform3D::default(),
+            material: None,
+            casts_shadows: true,
+            receives_shadows: true,
+            double_sided: DoubleSidedMeshes::None,
+            variant: None,
+        }
     }
 
-    /// Which meshes skip backface culling - drawn from both sides, for thin
-    /// surfaces like an afterburner's flame:
-    /// `.double_sided(DoubleSidedMeshes::Meshes(vec!["Afterburner".into()]))`.
-    /// It's part of the loaded model, which every node using the same one
-    /// shares - so the node that has it loaded decides (give them all the
-    /// same).
+    /// The model file (`.glb`/`.gltf`) at `path` in the assets folder.
+    pub fn file(path: impl Into<String>) -> Self {
+        Self { file: Some(normalize(&path.into())), ..Self::new() }
+    }
+
+    /// Adds `mesh` as the part `name` (replacing one with that name).
+    pub fn part(mut self, name: impl Into<String>, mesh: Mesh) -> Self {
+        self.add_part(name, mesh);
+        self
+    }
+
+    pub fn transform(mut self, transform: Transform3D) -> Self {
+        self.transform = transform;
+        self
+    }
+
+    /// The material of every part that doesn't have its own.
+    pub fn material(mut self, material: Material) -> Self {
+        self.material = Some(material);
+        self
+    }
+
+    /// The material of one part - one it was given, or a mesh of its file.
+    pub fn part_material(mut self, name: &str, material: Material) -> Self {
+        self.set_part_material(name, material);
+        self
+    }
+
+    pub fn casts_shadows(mut self, casts: bool) -> Self {
+        self.casts_shadows = casts;
+        self
+    }
+
+    pub fn receives_shadows(mut self, receives: bool) -> Self {
+        self.receives_shadows = receives;
+        self
+    }
+
+    /// Which of the file's meshes are drawn from both sides - thin surfaces
+    /// like an afterburner's flame. Every node using the same file shares
+    /// its loaded copy, so give them all the same.
     pub fn double_sided(mut self, double_sided: DoubleSidedMeshes) -> Self {
         self.double_sided = double_sided;
         self
     }
 
-    /// A separate copy of the model, `name`d - for when two uses of one
-    /// model need its meshes animated differently (mesh transforms are the
-    /// model's, shared by every node drawing it): a missile on a pylon
-    /// (plume off) and one in flight (plume lit). A light copy - its own mesh
-    /// transforms, the shared copy's geometry and textures.
+    /// A separate copy of the file, `name`d - for two uses of one file whose
+    /// meshes are animated differently (mesh transforms belong to the loaded
+    /// copy).
     pub fn variant(mut self, name: impl Into<String>) -> Self {
         self.variant = Some(name.into());
         self
     }
 
-    /// Drawn `scale` times its own size, the same on every axis.
-    pub fn scaled(self, scale: f32) -> Self {
-        self.with_scale(Vector3::new(scale, scale, scale))
+    pub fn add_part(&mut self, name: impl Into<String>, mesh: Mesh) {
+        let name = name.into();
+        match self.parts.iter_mut().find(|(part, _)| *part == name) {
+            Some((_, existing)) => *existing = mesh,
+            None => self.parts.push((name, mesh)),
+        }
     }
 
-    /// Drawn `scale` times its own size, per axis.
-    pub fn with_scale(mut self, scale: Vector3<f32>) -> Self {
-        self.scale = scale;
-        self
+    pub fn remove_part(&mut self, name: &str) -> Option<Mesh> {
+        let index = self.parts.iter().position(|(part, _)| part == name)?;
+        Some(self.parts.remove(index).1)
     }
 
-    /// The scale the model is actually drawn at on a node scaled
-    /// `node_scale`: the two multiplied, per axis.
-    pub fn render_scale(&self, node_scale: Vector3<f32>) -> Vector3<f32> {
-        node_scale.component_mul(&self.scale)
+    pub fn get_part(&self, name: &str) -> Option<&Mesh> {
+        self.parts.iter().find(|(part, _)| part == name).map(|(_, mesh)| mesh)
     }
 
-    /// What its loaded copy is kept under - its source's, and its variant's
-    /// name if it's one.
-    pub(crate) fn key(&self) -> String {
-        resources::variant_key(&self.source.key(), self.variant.as_deref())
+    pub fn part_mut(&mut self, name: &str) -> Option<&mut Mesh> {
+        self.parts.iter_mut().find(|(part, _)| part == name).map(|(_, mesh)| mesh)
     }
 
-    pub(crate) fn variant_name(&self) -> Option<&str> {
-        self.variant.as_deref()
+    /// The parts it was given, in order (not the file's meshes).
+    pub fn parts(&self) -> impl Iterator<Item = (&str, &Mesh)> {
+        self.parts.iter().map(|(name, mesh)| (name.as_str(), mesh))
     }
 
-    /// What loading its shared copy takes - or why it can't be (no such file
-    /// or mesh).
-    pub(crate) fn load(&self, assets: &AssetManager) -> Result<ModelLoad, String> {
-        assets.model_load(&self.source, &self.double_sided)
+    pub fn file_path(&self) -> Option<&str> {
+        self.file.as_deref()
+    }
+
+    /// Sets a part's material - one it was given, or a mesh of its file.
+    pub fn set_part_material(&mut self, name: &str, material: Material) {
+        if let Some(mesh) = self.part_mut(name) {
+            mesh.material = Some(material);
+            return;
+        }
+        match self.file_materials.iter_mut().find(|(mesh, _)| mesh == name) {
+            Some((_, existing)) => *existing = material,
+            None => self.file_materials.push((name.to_owned(), material)),
+        }
+    }
+
+    /// The file's drawn copy: its key, its double-sided meshes, its variant,
+    /// and its material with the per-mesh ones in.
+    pub(crate) fn file_draw(&self) -> Option<(ModelSource, &DoubleSidedMeshes, Option<&str>, Option<Cow<'_, Material>>)> {
+        let path = self.file.as_ref()?;
+        let material = match (&self.material, self.file_materials.is_empty()) {
+            (Some(material), true) => Some(Cow::Borrowed(material)),
+            (None, true) => None,
+            (base, false) => {
+                let mut material = base.clone().unwrap_or_else(Material::standard);
+                for (mesh, mesh_material) in &self.file_materials {
+                    material.meshes.insert(mesh.clone(), mesh_material.clone());
+                }
+                Some(Cow::Owned(material))
+            }
+        };
+        Some((ModelSource::File(path.clone()), &self.double_sided, self.variant.as_deref(), material))
+    }
+
+    /// How much bigger than its node it's drawn - for colliders read from
+    /// its file.
+    pub(crate) fn scale(&self) -> Vector3<f32> {
+        self.transform.scale
+    }
+}
+
+impl From<Mesh> for Model {
+    /// A model whose one part is `mesh`, named "mesh".
+    fn from(mesh: Mesh) -> Self {
+        Model::new().part("mesh", mesh)
     }
 }

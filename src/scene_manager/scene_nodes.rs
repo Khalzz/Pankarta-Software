@@ -5,7 +5,7 @@ use crate::rendering::camera::handler::SceneCameras;
 
 use nalgebra::{UnitQuaternion, Vector3};
 
-use crate::game_nodes::game_object::Physics;
+use crate::physics::Physics;
 
 use super::node::Node;
 use super::scene_access::{SceneAccess, SceneChanges};
@@ -57,6 +57,18 @@ impl SceneNodes {
         Ok(())
     }
 
+    /// Inserts `node` without running its behaviors' `on_spawn` - for a
+    /// scene being built, which runs them when it starts.
+    pub(crate) fn insert(&mut self, node: Node) -> Result<(), String> {
+        if self.nodes.contains_key(&node.id) {
+            let message = format!("scene already has a node named '{}' - refusing to overwrite it", node.id);
+            eprintln!("{message}");
+            return Err(message);
+        }
+        self.nodes.insert(node.id.clone(), node);
+        Ok(())
+    }
+
     pub fn get(&self, id: &str) -> Option<&Node> {
         self.nodes.get(id)
     }
@@ -67,6 +79,13 @@ impl SceneNodes {
 
     pub fn remove(&mut self, id: &str) -> Option<Node> {
         self.nodes.remove(id)
+    }
+
+    /// Puts back a node taken out with `remove` to be worked on (see
+    /// `App::with_layer_node`) - unlike `spawn`, its behaviors' `on_spawn`
+    /// doesn't run again.
+    pub(crate) fn put_back(&mut self, node: Node) {
+        self.nodes.insert(node.id.clone(), node);
     }
 
     /// Drops every spawned node - a scene-reset step (see `App::run`), so a
@@ -151,8 +170,14 @@ impl SceneNodes {
 
         for (_, id) in order {
             let Some(node) = self.nodes.get(&id) else { continue };
-            // A 2D node isn't placed in the 3D world.
+            // A 2D node isn't placed in the 3D world - it follows a 2D parent
+            // on the plane.
             if node.transform_2d().is_some() {
+                let parent = node.get_property::<Parent>().filter(|parent| parent.space == Space::Local);
+                let placed = parent.and_then(|parent| Some(self.nodes.get(&parent.id)?.transform_2d()?.compose(&parent.local_2d, parent.inherit_rotation)));
+                if let (Some(placed), Some(transform)) = (placed, self.nodes.get_mut(&id).and_then(|node| node.transform_2d_mut())) {
+                    *transform = placed;
+                }
                 continue;
             }
             let parent = node.get_property::<Parent>().filter(|parent| parent.space == Space::Local && node.get_property::<Physics>().is_none()).cloned();
@@ -208,6 +233,29 @@ impl SceneNodes {
     /// physics step (see `Behavior::fixed_update`).
     pub(crate) fn fixed_update(&mut self, cameras: &mut SceneCameras, app: &mut App, changes: &mut SceneChanges) {
         self.run_behaviors(cameras, app, changes, |node, scene, app| node.run_fixed_update(scene, app));
+    }
+
+    /// Runs every node's attached behaviors' `on_origin_shift` - right after
+    /// the floating origin moved the world by `shift` (see `WorldOrigin`).
+    pub(crate) fn origin_shift(&mut self, cameras: &mut SceneCameras, app: &mut App, changes: &mut SceneChanges, shift: Vector3<f32>) {
+        self.run_behaviors(cameras, app, changes, |node, scene, app| node.run_origin_shift(scene, app, shift));
+    }
+
+    /// Moves every node in the 3D world by `shift` - its `Transform3D`, and
+    /// the fixed world points its `Line`s end at. Nodes on the 2D plane stay.
+    /// A `Local` child moves with the rest (its offset from its parent
+    /// stays), so it's right before the hierarchy is resolved again too.
+    pub(crate) fn shift_origin(&mut self, shift: Vector3<f32>) {
+        for node in self.nodes.values_mut() {
+            if node.transform_2d().is_some() {
+                continue;
+            }
+            let Some(transform) = node.transform_3d_mut() else { continue };
+            transform.position += shift;
+            if let Some(line) = node.get_property_mut::<crate::scene_manager::node::properties::Line>() {
+                line.shift_world_points(shift);
+            }
+        }
     }
 }
 

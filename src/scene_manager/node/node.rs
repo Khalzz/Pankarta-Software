@@ -81,6 +81,8 @@ impl Node {
     /// `Transform3D` is `local`: an offset from this node's origin, moving
     /// and turning with it. Mark it `.global()` for a place in the world
     /// that stays put whatever this node does. Children can have children.
+    /// On the 2D plane it's the same with `Transform2D`. A child with no
+    /// transform sits right on this node, in 3D or in 2D.
     /// Its id is put under this node's when it spawns: "left_wing" under
     /// "plane" becomes "plane/left_wing" - `scene.child(&id, "left_wing")`
     /// finds it.
@@ -232,6 +234,14 @@ impl Node {
         let mut behaviors = std::mem::take(&mut self.behaviors);
         for behavior in behaviors.iter_mut() {
             behavior.fixed_update(self, scene, app);
+        }
+        self.behaviors = behaviors;
+    }
+
+    pub(crate) fn run_origin_shift(&mut self, scene: &mut SceneAccess, app: &mut App, shift: nalgebra::Vector3<f32>) {
+        let mut behaviors = std::mem::take(&mut self.behaviors);
+        for behavior in behaviors.iter_mut() {
+            behavior.on_origin_shift(self, scene, app, shift);
         }
         self.behaviors = behaviors;
     }

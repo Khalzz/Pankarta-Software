@@ -1,5 +1,4 @@
 use std::borrow::Borrow;
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -98,7 +97,7 @@ fn load_user_bindings(path: &Path) -> UserBindings {
 /// buttons/keys report a clean 0.0 or 1.0 so this only really matters for sticks/triggers.
 const PRESS_THRESHOLD: f32 = 0.5;
 
-///    # Input Subsystem
+///    # Input - `app.input`
 
 ///    Action-based input: instead of checking a single key, you check a named action
 ///    ("jump") that can be bound to any mix of keyboard keys, mouse buttons, controller
@@ -112,12 +111,15 @@ const PRESS_THRESHOLD: f32 = 0.5;
 ///    dropped on ControllerDeviceRemoved) so a controller plugged in mid-game works
 ///    immediately, without a separate one-shot "find a controller at startup" step.
 ///
-///    The engine starts with no actions - the game gives it its bindings file
-///    (`load_bindings("settings/input.ron")`), and optionally where the
-///    player's own rebinds are kept (`set_user_bindings_path`).
+///    The engine starts with no actions - the game gives it its default
+///    bindings, a file shipped with the game, outside the assets folder (they
+///    last the whole run, not a scene's):
+///    `app.input.load_bindings("settings/input.ron")?` - or built in with
+///    `load_bindings_from_str(include_str!(..))`. The player's own rebinds go
+///    in their own folder, writable wherever the game is installed:
+///    `app.input.set_user_bindings_path(Some(user_dir("Studio", "Game")?.join("bindings.ron")))`.
 ///
-///    Functions:
-///    - update() -> called once per frame (by App::run), polls SDL2 events and refreshes action state
+///    App::run polls SDL's events into it once per frame. Methods:
 ///    - is_action_pressed(action) / is_action_just_pressed(action) / is_action_just_released(action)
 ///    - action_strength(action) -> the raw 0.0..=1.0 value, for analog reads (throttle, stick deflection)
 ///    - get_axis(negative, positive) -> action_strength(positive) - action_strength(negative)
@@ -152,7 +154,7 @@ const PRESS_THRESHOLD: f32 = 0.5;
 ///    ```
 ///    `mouse` is the sensitivity the game starts players at; their own (see
 ///    `set_mouse_sensitivity`) is saved with their rebinds.
-pub struct InputSubsystem {
+pub struct Input {
     actions: HashMap<String, Action>,
     raw: RawInputState,
     // `raw` as it was last frame - what "just pressed/released" compares to.
@@ -195,8 +197,8 @@ pub struct InputSubsystem {
     mouse_button_events: Vec<MouseButtonEvent>,
 }
 
-impl InputSubsystem {
-    pub fn new(controller_subsystem: GameControllerSubsystem, joystick_subsystem: JoystickSubsystem) -> Self {
+impl Input {
+    pub(crate) fn new(controller_subsystem: GameControllerSubsystem, joystick_subsystem: JoystickSubsystem) -> Self {
         let mouse_settings = MouseSettings::default();
         Self {
             actions: HashMap::new(),
@@ -223,7 +225,7 @@ impl InputSubsystem {
 
     /// Replaces every action with the ones in `text` (a bindings file's
     /// contents), then the player's own rebinds over them.
-    fn load_bindings(&mut self, text: &str) -> Result<(), String> {
+    fn load_bindings_text(&mut self, text: &str) -> Result<(), String> {
         let settings: InputSettings = ron::from_str(text).map_err(|error| error.to_string())?;
         self.actions.clear();
         self.default_bindings.clear();
@@ -251,14 +253,9 @@ impl InputSubsystem {
         }
     }
 
-    fn set_user_bindings_path(&mut self, path: Option<PathBuf>) {
-        self.user_bindings_path = path;
-        self.apply_user_bindings();
-    }
-
     /// Every connected controller and joystick that can rumble, at `low`
     /// and `high` (0..1 - the heavy and the light motor) for `duration_ms`.
-    fn rumble(&mut self, low: f32, high: f32, duration_ms: u32) {
+    pub fn rumble(&mut self, low: f32, high: f32, duration_ms: u32) {
         let low = (low.clamp(0.0, 1.0) * u16::MAX as f32) as u16;
         let high = (high.clamp(0.0, 1.0) * u16::MAX as f32) as u16;
         for controller in self.controllers.values_mut() {
@@ -274,7 +271,7 @@ impl InputSubsystem {
     // do with that (break its loop gracefully, sending a physics shutdown
     // command first - see that loop's own comment on why this used to be a
     // raw std::process::exit(0) here instead, and why that was wrong).
-    pub fn update(&mut self, event_pump: &mut sdl2::EventPump, _delta_time: f32, debug: bool) -> bool {
+    pub(crate) fn update(&mut self, event_pump: &mut sdl2::EventPump, _delta_time: f32, debug: bool) -> bool {
         self.mouse.reset_rel_x();
         self.mouse.reset_rel_y();
         self.mouse.reset_scroll_y();
@@ -576,14 +573,11 @@ impl InputSubsystem {
         self.actions.get(action).map_or(0.0, Action::strength)
     }
 
-    pub fn get_axis(&self, negative: &InputSource, positive: &InputSource) -> f32 {
-        self.strength(positive) - self.strength(negative)
-    }
-
     /// How far `source` is pushed, 0..1 - an action's strongest binding, a
     /// key or button 0 or 1, an axis how far along. 0 for one its device
     /// doesn't have, or an action that doesn't exist.
-    pub fn strength(&self, source: &InputSource) -> f32 {
+    pub fn strength(&self, source: impl Into<InputSource>) -> f32 {
+        let source = source.into();
         match source.device {
             InputDevice::Action => self.action_strength(&source.name),
             _ => source.to_binding().map_or(0.0, |binding| binding.strength(&self.raw)),
@@ -591,7 +585,8 @@ impl InputSubsystem {
     }
 
     /// Whether `source` is held now - false for one its device doesn't have.
-    pub fn is_pressed(&self, source: &InputSource) -> bool {
+    pub fn is_pressed(&self, source: impl Into<InputSource>) -> bool {
+        let source = source.into();
         match source.device {
             InputDevice::Action => self.actions.get(&source.name).is_some_and(Action::is_pressed),
             _ => source.to_binding().is_some_and(|binding| binding.strength(&self.raw) > PRESS_THRESHOLD),
@@ -600,7 +595,8 @@ impl InputSubsystem {
 
     /// Whether `source` went down this frame (in a physics step's
     /// fixed_update: since the last step).
-    pub fn is_just_pressed(&self, source: &InputSource) -> bool {
+    pub fn is_just_pressed(&self, source: impl Into<InputSource>) -> bool {
+        let source = source.into();
         match source.device {
             InputDevice::Action => self.actions.get(&source.name).is_some_and(|action| self.action_went(action, true)),
             _ => source.to_binding().is_some_and(|binding| binding.strength(&self.raw) > PRESS_THRESHOLD && binding.strength(self.baseline()) <= PRESS_THRESHOLD),
@@ -609,7 +605,8 @@ impl InputSubsystem {
 
     /// Whether `source` came up this frame (in a physics step's
     /// fixed_update: since the last step).
-    pub fn is_just_released(&self, source: &InputSource) -> bool {
+    pub fn is_just_released(&self, source: impl Into<InputSource>) -> bool {
+        let source = source.into();
         match source.device {
             InputDevice::Action => self.actions.get(&source.name).is_some_and(|action| self.action_went(action, false)),
             _ => source.to_binding().is_some_and(|binding| binding.strength(&self.raw) <= PRESS_THRESHOLD && binding.strength(self.baseline()) > PRESS_THRESHOLD),
@@ -619,7 +616,7 @@ impl InputSubsystem {
     /// Adds `binding` to `action` - making the action if there isn't one -
     /// as one of the game's own (not saved as a player's rebind). One the
     /// action has already is left as it is.
-    pub fn bind(&mut self, action: &str, binding: Binding) {
+    fn bind_binding(&mut self, action: &str, binding: Binding) {
         let defaults = self.default_bindings.entry(action.to_owned()).or_default();
         if !defaults.contains(&binding) {
             defaults.push(binding.clone());
@@ -731,143 +728,183 @@ impl InputSubsystem {
     }
 }
 
-// Global input singleton - lets any code query input state (input::is_action_pressed("jump"))
-// without threading a &InputSubsystem parameter through every function that needs it,
-// the same way Godot's Input singleton works. thread_local rather than a cross-thread
-// static: GameControllerSubsystem/GameController wrap raw SDL pointers that aren't
-// Send/Sync, and SDL controller/event handling is only ever valid on the thread that
-// initialized it anyway (the main thread here) - a thread_local is the honest fit,
-// not a workaround, since nothing in this project touches input off the main thread.
-thread_local! {
-    static INPUT: RefCell<Option<InputSubsystem>> = RefCell::new(None);
-}
+// The game-facing half - what `app.input` is used through.
+impl Input {
+    /// Replaces every action with the ones in the bindings file at `path` (see
+    /// Input's own doc comment for its shape) - then the player's own
+    /// rebinds over them, if there's a user bindings file.
+    pub fn load_bindings(&mut self, path: impl AsRef<Path>) -> Result<(), String> {
+        let path = path.as_ref();
+        let text = std::fs::read_to_string(path).map_err(|error| format!("couldn't read {}: {error}", path.display()))?;
+        self.load_bindings_from_str(&text).map_err(|error| format!("{} isn't valid: {error}", path.display()))
+    }
 
-fn with_input<T>(f: impl FnOnce(&InputSubsystem) -> T) -> T {
-    INPUT.with(|cell| {
-        let cell = cell.borrow();
-        let input = cell.as_ref().expect("input::init() must be called before using the input subsystem");
-        f(input)
-    })
-}
+    /// `load_bindings` from the file's contents - for bindings built into the
+    /// game (`include_str!`) instead of read at runtime.
+    pub fn load_bindings_from_str(&mut self, text: &str) -> Result<(), String> {
+        self.load_bindings_text(text)
+    }
 
-fn with_input_mut<T>(f: impl FnOnce(&mut InputSubsystem) -> T) -> T {
-    INPUT.with(|cell| {
-        let mut cell = cell.borrow_mut();
-        let input = cell.as_mut().expect("input::init() must be called before using the input subsystem");
-        f(input)
-    })
-}
+    /// Where the player's rebinds are saved (every change) and read back from,
+    /// over the game's bindings - e.g. `user_dir("Studio", "Game")?.join("bindings.ron")`
+    /// (see `user_dir`). None (the default): rebinds last until the game closes.
+    pub fn set_user_bindings_path(&mut self, path: Option<impl Into<PathBuf>>) {
+        self.user_bindings_path = path.map(Into::into);
+        self.apply_user_bindings();
+    }
 
-/// Initializes the global input singleton - with no actions until the game
-/// loads its bindings (see `load_bindings`). Called once by App::new, on the
-/// main thread.
-pub(crate) fn init(controller_subsystem: GameControllerSubsystem, joystick_subsystem: JoystickSubsystem) {
-    INPUT.with(|cell| {
-        if cell.borrow().is_some() {
-            panic!("input subsystem already initialized");
+    pub fn stop_rumble(&mut self) {
+        self.rumble(0.0, 0.0, 0);
+    }
+
+    /// `positive`'s strength minus `negative`'s, -1..1 - each an action's name
+    /// (`get_axis("Left", "Right")`) or any source
+    /// (`get_axis(InputSource::key(Key::A), InputSource::key(Key::D))`), mixed
+    /// as you like.
+    pub fn get_axis(&self, negative: impl Into<InputSource>, positive: impl Into<InputSource>) -> f32 {
+        self.strength(positive) - self.strength(negative)
+    }
+
+    /// Two axes as a direction - x from `left`/`right`, y from `up`/`down` (y
+    /// down, like the screen) - each an action's name or any source (see
+    /// `get_axis`) - as they are: moving diagonally gives a longer
+    /// vector than straight. Chain `.normalize()` for one always 1 long (or
+    /// zero, with nothing pressed):
+    ///
+    ///     let direction = app.input.get_vector("Left", "Right", "Up", "Down").normalize();
+    ///     transform.position += direction * speed * app.time.delta_time;
+    pub fn get_vector(&self, left: impl Into<InputSource>, right: impl Into<InputSource>, up: impl Into<InputSource>, down: impl Into<InputSource>) -> InputVector {
+        InputVector(Vector2::new(self.get_axis(left, right), self.get_axis(up, down)))
+    }
+
+    /// Binds `action` to `source` - `InputSource::key(Key::Space)`,
+    /// `InputSource::controller(Button::A)`, one from `read_input`... - making
+    /// the action if it doesn't exist yet. The game's own binding, like its
+    /// bindings file's: call it after `load_bindings` (which replaces every
+    /// action) and before `set_user_bindings_path`, so the player's rebinds
+    /// still win. A source built by hand with a name its device doesn't have is
+    /// reported and left out.
+    pub fn bind(&mut self, action: &str, source: impl Borrow<InputSource>) {
+        let source = source.borrow();
+        match source.to_binding() {
+            Some(binding) => self.bind_binding(action, binding),
+            None => eprintln!("input.bind(\"{action}\"): '{source}' isn't a key or a button - left out"),
         }
-        *cell.borrow_mut() = Some(InputSubsystem::new(controller_subsystem, joystick_subsystem));
-    });
+    }
+
+    /// The first key, button or axis direction pressed this frame (see
+    /// InputSource) - None when nothing was. It still counts as pressed for
+    /// everything else, unlike `begin_capture`.
+    pub fn read_input(&self) -> Option<InputSource> {
+        self.pressed_sources.first().cloned()
+    }
+
+    /// Everything pressed this frame - keys and buttons in the order they went
+    /// down, then axes and hats.
+    pub fn read_inputs(&self) -> &[InputSource] {
+        &self.pressed_sources
+    }
+
+    pub fn mouse_rel_x(&self) -> i32 {
+        self.mouse.get_rel_x()
+    }
+
+    pub fn mouse_rel_y(&self) -> i32 {
+        self.mouse.get_rel_y()
+    }
+
+    // Absolute, window-relative, top-left-origin pixels - the same coordinate space
+    // UiTransform.rect is already in, so this is directly usable for UI hit-testing
+    // (see UiNode::on_hover) with no conversion.
+    pub fn mouse_x(&self) -> i32 {
+        self.mouse.get_raw_x()
+    }
+
+    pub fn mouse_y(&self) -> i32 {
+        self.mouse.get_raw_y()
+    }
+
+    pub fn mouse_scroll_y(&self) -> f32 {
+        self.mouse.get_scroll_y()
+    }
+
+    // Raw left-button-down state, distinct from any bound action - for feeding
+    // egui::RawInput (see engine::rendering::egui_overlay), which needs the
+    // literal button state rather than a game action.
+    pub fn mouse_left_button_down(&self) -> bool {
+        self.raw.mouse_buttons_down.contains(&sdl2::mouse::MouseButton::Left)
+    }
+
+    /// Whether the left mouse button went down this frame - what the engine's UI
+    /// counts as a click (see UiNode::on_click), whatever the game's bindings are.
+    pub fn mouse_left_button_just_pressed(&self) -> bool {
+        self.mouse_button_events.iter().any(|event| event.pressed && event.button == sdl2::mouse::MouseButton::Left)
+    }
+
+    // Raw right-button-down state - for feeding egui (see mouse_left_button_down).
+    pub fn mouse_right_button_down(&self) -> bool {
+        self.raw.mouse_buttons_down.contains(&sdl2::mouse::MouseButton::Right)
+    }
+
+    // Raw middle-button-down state - for feeding egui (see mouse_left_button_down).
+    pub fn mouse_middle_button_down(&self) -> bool {
+        self.raw.mouse_buttons_down.contains(&sdl2::mouse::MouseButton::Middle)
+    }
+
+    // Whether either Shift / Ctrl key is held right now - for feeding egui its
+    // modifiers (see mouse_left_button_down).
+    pub fn shift_down(&self) -> bool {
+        self.raw.keys_down.contains("LEFT SHIFT") || self.raw.keys_down.contains("RIGHT SHIFT")
+    }
+
+    pub fn ctrl_down(&self) -> bool {
+        self.raw.keys_down.contains("LEFT CTRL") || self.raw.keys_down.contains("RIGHT CTRL")
+    }
+
+    /// This frame's raw typing, in order - see `TypedInput`.
+    pub fn typed_input(&self) -> &[TypedInput] {
+        &self.typed
+    }
+
+    /// This frame's mouse button presses and releases, in order, with where
+    /// each happened - every one of them, even a click quick enough to go down
+    /// and up between two frames (which `mouse_left_button_down` never sees).
+    /// For feeding egui (see egui_overlay.rs).
+    pub fn mouse_button_events(&self) -> &[MouseButtonEvent] {
+        &self.mouse_button_events
+    }
+
+    /// The player's mouse sensitivity, x and y - see `mouse_look`.
+    pub fn mouse_sensitivity(&self) -> (f32, f32) {
+        self.mouse.get_sensitivity()
+    }
+
+    /// Sets the player's mouse sensitivity (1: as the mouse reports it) - what
+    /// `mouse_look` multiplies by. Saved with their controls (see
+    /// `set_user_bindings_path`), so it's there next time.
+    pub fn set_mouse_sensitivity(&mut self, x: f32, y: f32) {
+        self.mouse.set_sensitivity(x, y);
+        self.save_bindings();
+    }
+
+    /// How far the mouse moved this frame, times the player's sensitivity - for
+    /// turning a camera, aiming: the game multiplies it by what one count means
+    /// to it (an angle, a distance). Right and down are positive. Not rounded:
+    /// a sensitivity of 0.8 gives 0.8 of a count. `mouse_rel_x/y` are the raw
+    /// counts, for exact pixels.
+    pub fn mouse_look(&self) -> Vector2<f32> {
+        let (x_sensitivity, y_sensitivity) = self.mouse.get_sensitivity();
+        Vector2::new(self.mouse.get_rel_x() as f32 * x_sensitivity, self.mouse.get_rel_y() as f32 * y_sensitivity)
+    }
 }
 
-/// Replaces every action with the ones in the bindings file at `path` (see
-/// InputSubsystem's own doc comment for its shape) - then the player's own
-/// rebinds over them, if there's a user bindings file.
-pub fn load_bindings(path: impl AsRef<Path>) -> Result<(), String> {
-    let path = path.as_ref();
-    let text = std::fs::read_to_string(path).map_err(|error| format!("couldn't read {}: {error}", path.display()))?;
-    load_bindings_from_str(&text).map_err(|error| format!("{} isn't valid: {error}", path.display()))
-}
-
-/// `load_bindings` from the file's contents - for bindings built into the
-/// game (`include_str!`) instead of read at runtime.
-pub fn load_bindings_from_str(text: &str) -> Result<(), String> {
-    with_input_mut(|input| input.load_bindings(text))
-}
-
-/// Where the player's rebinds are saved (every change) and read back from,
-/// over the game's bindings - e.g. "settings/bindings.ron". None (the
-/// default): rebinds last until the game closes.
-pub fn set_user_bindings_path(path: Option<impl Into<PathBuf>>) {
-    with_input_mut(|input| input.set_user_bindings_path(path.map(Into::into)))
-}
-
-/// Rumbles every connected controller and joystick that can - `low` and
-/// `high` (0..1) are the heavy and the light motor - for `duration_ms`.
-/// A new call replaces whatever was rumbling.
-pub fn rumble(low: f32, high: f32, duration_ms: u32) {
-    with_input_mut(|input| input.rumble(low, high, duration_ms))
-}
-
-pub fn stop_rumble() {
-    rumble(0.0, 0.0, 0);
-}
-
-/// The value of a lever bound to `action` - 0..1 end to end - while one's
-/// connected (see `Binding::JoystickAxis::full_range`). For an action read as
-/// a position (a throttle) rather than pressed/not.
-pub fn absolute_value(action: &str) -> Option<f32> {
-    with_input(|input| input.absolute_value(action))
-}
-
-/// Polls SDL2 events and refreshes action/mouse state - call once per frame.
-/// Returns true if the OS/window manager requested a close this poll - see
-/// InputSubsystem::update's own doc comment.
-pub fn update(event_pump: &mut sdl2::EventPump, delta_time: f32, debug: bool) -> bool {
-    with_input_mut(|input| input.update(event_pump, delta_time, debug))
-}
-
-/// See `InputSubsystem::begin_fixed_step` - App::run, around each physics
-/// step's fixed_updates.
-pub(crate) fn begin_fixed_step() {
-    with_input_mut(|input| input.begin_fixed_step())
-}
-
-pub(crate) fn end_fixed_step() {
-    with_input_mut(|input| input.end_fixed_step())
-}
-
-pub fn is_action_pressed(action: &str) -> bool {
-    with_input(|input| input.is_action_pressed(action))
-}
-
-pub fn is_action_just_pressed(action: &str) -> bool {
-    with_input(|input| input.is_action_just_pressed(action))
-}
-
-pub fn is_action_just_released(action: &str) -> bool {
-    with_input(|input| input.is_action_just_released(action))
-}
-
-pub fn action_strength(action: &str) -> f32 {
-    with_input(|input| input.action_strength(action))
-}
-
-/// `positive`'s strength minus `negative`'s, -1..1 - each an action's name
-/// (`get_axis("Left", "Right")`) or any source
-/// (`get_axis(InputSource::key(Key::A), InputSource::key(Key::D))`), mixed
-/// as you like.
-pub fn get_axis(negative: impl Into<InputSource>, positive: impl Into<InputSource>) -> f32 {
-    let (negative, positive) = (negative.into(), positive.into());
-    with_input(|input| input.get_axis(&negative, &positive))
-}
-
-/// How far `source` (an action's name, or any source) is pushed, 0..1.
-pub fn strength(source: impl Into<InputSource>) -> f32 {
-    let source = source.into();
-    with_input(|input| input.strength(&source))
-}
-
-/// Two axes as a direction - x from `left`/`right`, y from `up`/`down` (y
-/// down, like the screen) - each an action's name or any source (see
-/// `get_axis`) - as they are: moving diagonally gives a longer
-/// vector than straight. Chain `.normalize()` for one always 1 long (or
-/// zero, with nothing pressed):
-///
-///     let direction = input::get_vector("Left", "Right", "Up", "Down").normalize();
-///     transform.position += direction * speed * app.time.delta_time;
-pub fn get_vector(left: impl Into<InputSource>, right: impl Into<InputSource>, up: impl Into<InputSource>, down: impl Into<InputSource>) -> InputVector {
-    InputVector(Vector2::new(get_axis(left, right), get_axis(up, down)))
+/// The folder this player's files for this game belong in - their rebinds
+/// (see `Input::set_user_bindings_path`), saves... - made if it isn't there
+/// yet. Per user and writable wherever the game is installed:
+/// `%APPDATA%\org\game\` on Windows, `~/.local/share/game/` on Linux,
+/// `~/Library/Application Support/game/` on macOS.
+pub fn user_dir(org: &str, game: &str) -> Result<PathBuf, String> {
+    sdl2::filesystem::pref_path(org, game).map(PathBuf::from).map_err(|error| error.to_string())
 }
 
 /// What `get_vector` returns - used like the `Vector2` it holds (`.x`,
@@ -903,180 +940,6 @@ impl From<InputVector> for Vector2<f32> {
     fn from(vector: InputVector) -> Self {
         vector.0
     }
-}
-
-pub fn mouse_rel_x() -> i32 {
-    with_input(|input| input.mouse.get_rel_x())
-}
-
-pub fn mouse_rel_y() -> i32 {
-    with_input(|input| input.mouse.get_rel_y())
-}
-
-// Absolute, window-relative, top-left-origin pixels - the same coordinate space
-// UiTransform.rect is already in, so this is directly usable for UI hit-testing
-// (see UiNode::on_hover) with no conversion.
-pub fn mouse_x() -> i32 {
-    with_input(|input| input.mouse.get_raw_x())
-}
-
-pub fn mouse_y() -> i32 {
-    with_input(|input| input.mouse.get_raw_y())
-}
-
-pub fn mouse_scroll_y() -> f32 {
-    with_input(|input| input.mouse.get_scroll_y())
-}
-
-// Raw left-button-down state, distinct from any bound action - for feeding
-// egui::RawInput (see engine::rendering::egui_overlay), which needs the
-// literal button state rather than a game action.
-pub fn mouse_left_button_down() -> bool {
-    with_input(|input| input.raw.mouse_buttons_down.contains(&sdl2::mouse::MouseButton::Left))
-}
-
-/// Whether the left mouse button went down this frame - what the engine's UI
-/// counts as a click (see UiNode::on_click), whatever the game's bindings are.
-pub fn mouse_left_button_just_pressed() -> bool {
-    with_input(|input| input.mouse_button_events.iter().any(|event| event.pressed && event.button == sdl2::mouse::MouseButton::Left))
-}
-
-// Raw right-button-down state - for feeding egui (see mouse_left_button_down).
-pub fn mouse_right_button_down() -> bool {
-    with_input(|input| input.raw.mouse_buttons_down.contains(&sdl2::mouse::MouseButton::Right))
-}
-
-// Whether either Shift / Ctrl key is held right now - for feeding egui its
-// modifiers (see mouse_left_button_down).
-pub fn shift_down() -> bool {
-    with_input(|input| input.raw.keys_down.contains("LEFT SHIFT") || input.raw.keys_down.contains("RIGHT SHIFT"))
-}
-
-pub fn ctrl_down() -> bool {
-    with_input(|input| input.raw.keys_down.contains("LEFT CTRL") || input.raw.keys_down.contains("RIGHT CTRL"))
-}
-
-// Raw middle-button-down state - for feeding egui (see mouse_left_button_down).
-pub fn mouse_middle_button_down() -> bool {
-    with_input(|input| input.raw.mouse_buttons_down.contains(&sdl2::mouse::MouseButton::Middle))
-}
-
-/// This frame's raw typing, in order - see `TypedInput`.
-pub fn typed_input() -> Vec<TypedInput> {
-    with_input(|input| input.typed.clone())
-}
-
-/// This frame's mouse button presses and releases, in order, with where
-/// each happened - every one of them, even a click quick enough to go down
-/// and up between two frames (which `mouse_left_button_down` never sees).
-/// For feeding egui (see render_pass.rs).
-pub fn mouse_button_events() -> Vec<MouseButtonEvent> {
-    with_input(|input| input.mouse_button_events.clone())
-}
-
-/// The player's mouse sensitivity, x and y - see `mouse_look`.
-pub fn mouse_sensitivity() -> (f32, f32) {
-    with_input(|input| input.mouse.get_sensitivity())
-}
-
-/// Sets the player's mouse sensitivity (1: as the mouse reports it) - what
-/// `mouse_look` multiplies by. Saved with their controls (see
-/// `set_user_bindings_path`), so it's there next time.
-pub fn set_mouse_sensitivity(x: f32, y: f32) {
-    with_input_mut(|input| {
-        input.mouse.set_sensitivity(x, y);
-        input.save_bindings();
-    })
-}
-
-/// How far the mouse moved this frame, times the player's sensitivity - for
-/// turning a camera, aiming: the game multiplies it by what one count means
-/// to it (an angle, a distance). Right and down are positive. Not rounded:
-/// a sensitivity of 0.8 gives 0.8 of a count. `mouse_rel_x/y` are the raw
-/// counts, for exact pixels.
-pub fn mouse_look() -> Vector2<f32> {
-    with_input(|input| {
-        let (x_sensitivity, y_sensitivity) = input.mouse.get_sensitivity();
-        Vector2::new(input.mouse.get_rel_x() as f32 * x_sensitivity, input.mouse.get_rel_y() as f32 * y_sensitivity)
-    })
-}
-
-pub fn begin_capture() {
-    with_input_mut(|input| input.begin_capture());
-}
-
-pub fn captured_binding() -> Option<Binding> {
-    with_input_mut(|input| input.captured_binding())
-}
-
-pub fn rebind(action: &str, binding: Binding) {
-    with_input_mut(|input| input.rebind(action, binding));
-}
-
-pub fn rebind_at(action: &str, index: usize, binding: Binding) {
-    with_input_mut(|input| input.rebind_at(action, index, binding));
-}
-
-pub fn action_bindings(action: &str) -> Vec<Binding> {
-    with_input(|input| input.action_bindings(action))
-}
-
-pub fn unbind(action: &str, index: usize) {
-    with_input_mut(|input| input.unbind(action, index));
-}
-
-pub fn clear_bindings(action: &str) {
-    with_input_mut(|input| input.clear_bindings(action));
-}
-
-pub fn cancel_capture() {
-    with_input_mut(|input| input.cancel_capture());
-}
-
-/// Whether `source` is held now - an action's name (`is_pressed("jump")`),
-/// or any key, button or axis direction (`is_pressed(InputSource::key(Key::Space))`,
-/// whatever the bindings are). Takes a source or a reference to one.
-pub fn is_pressed(source: impl Into<InputSource>) -> bool {
-    let source = source.into();
-    with_input(|input| input.is_pressed(&source))
-}
-
-pub fn is_just_pressed(source: impl Into<InputSource>) -> bool {
-    let source = source.into();
-    with_input(|input| input.is_just_pressed(&source))
-}
-
-pub fn is_just_released(source: impl Into<InputSource>) -> bool {
-    let source = source.into();
-    with_input(|input| input.is_just_released(&source))
-}
-
-/// Binds `action` to `source` - `InputSource::key(Key::Space)`,
-/// `InputSource::controller(Button::A)`, one from `read_input`... - making
-/// the action if it doesn't exist yet. The game's own binding, like its
-/// bindings file's: call it after `load_bindings` (which replaces every
-/// action) and before `set_user_bindings_path`, so the player's rebinds
-/// still win. A source built by hand with a name its device doesn't have is
-/// reported and left out.
-pub fn bind(action: &str, source: impl Borrow<InputSource>) {
-    let source = source.borrow();
-    match source.to_binding() {
-        Some(binding) => with_input_mut(|input| input.bind(action, binding)),
-        None => eprintln!("input::bind(\"{action}\"): '{source}' isn't a key or a button - left out"),
-    }
-}
-
-/// The first key, button or axis direction pressed this frame (see
-/// InputSource) - None when nothing was. It still counts as pressed for
-/// everything else, unlike `begin_capture`.
-pub fn read_input() -> Option<InputSource> {
-    with_input(|input| input.pressed_sources.first().cloned())
-}
-
-/// Everything pressed this frame - keys and buttons in the order they went
-/// down, then axes and hats.
-pub fn read_inputs() -> Vec<InputSource> {
-    with_input(|input| input.pressed_sources.clone())
 }
 
 #[cfg(test)]

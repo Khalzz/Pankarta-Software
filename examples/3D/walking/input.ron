@@ -1,0 +1,13 @@
+// The walking example's default controls - see Input's doc comment for the
+// shape. The player's rebinds go to their own folder (see main.rs), not here.
+(
+    actions: [
+        (action: "forward", bindings: [Key("W"), ControllerAxis(axis: "LeftY", positive: false)]),
+        (action: "back", bindings: [Key("S"), ControllerAxis(axis: "LeftY", positive: true)]),
+        (action: "left", bindings: [Key("A"), ControllerAxis(axis: "LeftX", positive: false)]),
+        (action: "right", bindings: [Key("D"), ControllerAxis(axis: "LeftX", positive: true)]),
+        (action: "jump", bindings: [Key("Space"), ControllerButton("A")]),
+        (action: "run", bindings: [Key("Left Shift"), ControllerButton("LeftShoulder")]),
+    ],
+    mouse: (x_sensitivity: 3.0, y_sensitivity: 3.0),
+)

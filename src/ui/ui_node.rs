@@ -1,12 +1,14 @@
 use glyphon::{cosmic_text::Align, Color as GlyphonColor, FontSystem, SwashCache, TextArea};
 use nalgebra::vector;
 use crate::app::{App, Size};
-use crate::input::input;
+use crate::input::input::Input;
+use crate::scene_manager::node::Node;
+use crate::scene_manager::scene_access::SceneAccess;
 use crate::rendering::ui::ui::UiRendering;
 use crate::scene_manager::node::properties::Material;
 use crate::rendering::vertex::{ImageVertex, VertexUi};
 use crate::utils::lerps::lerp;
-use crate::window::window::CursorIcon;
+use crate::window::CursorIcon;
 use crate::ui::widgets::text_input::TextInputState;
 use crate::ui::widgets::toggle::ToggleState;
 use crate::ui::widgets::dropdown::DropdownState;
@@ -16,7 +18,16 @@ use super::text_style::TextStyle;
 use super::components::container::{Container, Scrollbar};
 use super::components::image::ImageNode;
 use super::ui_transform::{Anchor, BorderEdges, ChildAnchor, Orientation, Padding, PositionValue, Rect, SizeValue, UiTransform};
-use super::ui_structure;
+
+/// What runs when a node is clicked - see `UiNode::on_click`.
+pub(crate) enum ClickHandler {
+    /// The engine's own (a toggle flipping, a dropdown opening its list) -
+    /// only needs the app, so it also works in the engine's own UI.
+    Engine(Box<dyn FnMut(&mut App)>),
+    /// A game's: gets the node whose `UiLayer` was clicked, the rest of its
+    /// scene and the app - like a behavior.
+    Node(Box<dyn FnMut(&mut Node, &mut SceneAccess, &mut App)>),
+}
 
 pub enum UiNodeContent {
     Text(Label),
@@ -328,12 +339,13 @@ pub struct UiNode {
     // button stays down over this node (unlike is_clicked, which is only true the
     // one frame it goes down) - exposed read-only, drives the press style.
     pub is_pressed: bool,
-    // Callback registered via `.on_click(...)`, invoked from `take_click_handlers`
-    // (called separately from `node_content_preparation` since firing it needs
-    // `&mut App`, which that pass doesn't have - see `App::fire_ui_click_handlers`).
-    // Boxed since each node's closure has its own capture, `FnMut` (not `FnOnce`)
-    // since it can fire many times over the node's life.
-    on_click: Option<Box<dyn FnMut(&mut App)>>,
+    // Callback registered via `.on_click(...)` - fired after the drawing
+    // pass worked out what was clicked (see `clicked_paths`/`App::
+    // fire_ui_click_handlers`), since firing it needs the app and the scene,
+    // which that pass doesn't have. Boxed since each node's closure has its
+    // own capture, `FnMut` (not `FnOnce`) since it can fire many times over
+    // the node's life.
+    on_click: Option<ClickHandler>,
     // Recomputed every frame alongside is_hovered - true only on the exact frame the
     // click happened (see node_content_preparation), so take_click_handlers firing
     // every frame regardless still only calls on_click once per actual click.
@@ -376,10 +388,10 @@ fn in_flow(node: &UiNode) -> bool {
 }
 
 impl UiNode {
-    /// Fills in every field every constructor (`label`/`image`/`container`/
-    /// `from_component`) needs identically, so they only have to state what's
-    /// actually different about them (`transform`/`style`/`content`) instead of
-    /// repeating this struct literal four times.
+    /// Fills in every field every constructor (`label`/`image`/`container`)
+    /// needs identically, so they only have to state what's actually
+    /// different about them (`transform`/`style`/`content`) instead of
+    /// repeating this struct literal three times.
     fn base(transform: UiTransform, style: Style, content: UiNodeContent) -> Self {
         Self {
             transform,
@@ -432,7 +444,7 @@ impl UiNode {
 
     /// Fades this node's own content (text alpha or image tint alpha) - has no
     /// effect on containers, which don't have a single color of their own - for
-    /// fading elements in/out (the loading screen's text, say). Text
+    /// fading elements in/out (a menu's text, say). Text
     /// bakes the alpha straight into `style.text_color`'s alpha channel (keeping its
     /// RGB) since text has no separate alpha channel of its own to blend with;
     /// images use `style.alpha` directly, resolved at render time same as hover.
@@ -453,7 +465,7 @@ impl UiNode {
     /// Named distinctly from `.set_position(...)` (the richer, deferred
     /// `PositionValue` builder) on purpose - this is an immediate, raw-pixel runtime
     /// mutator meant for a node you already have a `&mut` to (e.g. via
-    /// `Ui::get_ui_node`), not a construction-time builder call.
+    /// `UiLayer::get_mut`), not a construction-time builder call.
     pub fn move_to(&mut self, x: f32, y: f32) {
         self.transform.x = x;
         self.transform.y = y;
@@ -608,7 +620,7 @@ impl UiNode {
     /// `None` leaves each label on its own color.
     /// `ancestor_disabled`: an ancestor is disabled (see `set_enabled`) - so
     /// this node is too, whatever its own setting.
-    pub fn node_content_preparation(&mut self, size: &Size, dpi_scale: f32, ui: &mut UiRendering, font_system: &mut FontSystem, text_cache: &mut SwashCache, delta_time: f32, hit_testable: bool, clip_rect: Option<&Rect>, ancestor_hover_text: Option<UiColor>, ancestor_disabled: bool) -> (Vec<TextArea<'_>>, u16, u32) {
+    pub fn node_content_preparation(&mut self, size: &Size, dpi_scale: f32, ui: &mut UiRendering, input: &Input, font_system: &mut FontSystem, text_cache: &mut SwashCache, delta_time: f32, hit_testable: bool, clip_rect: Option<&Rect>, ancestor_hover_text: Option<UiColor>, ancestor_disabled: bool) -> (Vec<TextArea<'_>>, u16, u32) {
         // Inactive nodes render nothing and can't be hovered/clicked - their
         // *parent's* layout loop is what skips giving them any space (this alone
         // wouldn't stop them occupying a stacking slot), see the Container branch
@@ -648,14 +660,14 @@ impl UiNode {
         // though it isn't actually being drawn there (see clip_rect's own doc
         // comment on this fn).
         // In UI units, like every rect here (see Ui::scale_factor).
-        let (mouse_x, mouse_y) = ui.mouse();
+        let (mouse_x, mouse_y) = ui.mouse(input);
         let mouse_over = hit_testable
             && point_in_rect(mouse_x, mouse_y, &self.transform.rect)
             && clip_rect.map_or(true, |clip| point_in_rect(mouse_x, mouse_y, clip));
         self.is_hovered = self.hover.is_some() && mouse_over;
         // The left mouse button itself, not a game action - the UI works
         // whatever bindings the game loads.
-        self.is_pressed = self.press.is_some() && mouse_over && input::mouse_left_button_down();
+        self.is_pressed = self.press.is_some() && mouse_over && input.mouse_left_button_down();
 
         // Hover's Some(...) fields win over the resting style, its None fields fall
         // back to it - built fresh every frame (not written back into self.style),
@@ -678,7 +690,7 @@ impl UiNode {
             Some(disabled_style) if disabled => disabled_style.or(&effective_style),
             _ => effective_style,
         };
-        self.is_clicked = mouse_over && input::mouse_left_button_just_pressed();
+        self.is_clicked = mouse_over && input.mouse_left_button_just_pressed();
         // Parents run before their children and always_on_top nodes last, so
         // the last node to write here is the one drawn on top.
         if mouse_over && self.cursor.is_some() {
@@ -694,17 +706,17 @@ impl UiNode {
         // A text input (see widgets::text_input): focus and typing, then its
         // text and caret into its children, and its focus look over its style.
         let effective_style = match self.text_input.as_deref_mut() {
-            Some(input) => {
+            Some(text_input) => {
                 // Disabled while being typed into - it stops there.
                 if disabled {
-                    input.focused = false;
+                    text_input.focused = false;
                 }
                 let text_left = self.transform.rect.left + self.padding.left;
                 let text_room = self.transform.width - self.padding.left - self.padding.right;
-                input.update(&mut self.content, font_system, self.is_clicked, delta_time, mouse_x - text_left, text_room);
-                if input.focused {
+                text_input.update(&mut self.content, font_system, input, self.is_clicked, delta_time, mouse_x - text_left, text_room);
+                if text_input.focused {
                     ui.text_input_focused = true;
-                    input.focus.or(&effective_style)
+                    text_input.focus.or(&effective_style)
                 } else {
                     effective_style
                 }
@@ -994,7 +1006,7 @@ impl UiNode {
                 let max_scroll = if scrollable && matches!(direction, Orientation::Vertical) {
                     let max_scroll = (total_children_main - content_h).max(0.0);
                     if mouse_over {
-                        container.scroll_target -= input::mouse_scroll_y() * SCROLL_SPEED;
+                        container.scroll_target -= input.mouse_scroll_y() * SCROLL_SPEED;
                     }
                     container.scroll_target = container.scroll_target.clamp(0.0, max_scroll);
                     let t = (delta_time / (SCROLL_SMOOTH_MS / 1000.0)).min(1.0);
@@ -1122,7 +1134,7 @@ impl UiNode {
                         child.transform.apply_transformation();
                     }
 
-                    let (child_text_areas, _cv, _ci) = child.node_content_preparation(size, dpi_scale, ui, font_system, text_cache, delta_time, hit_testable, child_clip_rect, child_hover_text, disabled);
+                    let (child_text_areas, _cv, _ci) = child.node_content_preparation(size, dpi_scale, ui, input, font_system, text_cache, delta_time, hit_testable, child_clip_rect, child_hover_text, disabled);
                     text_areas.extend(child_text_areas);
                 }
 
@@ -1234,40 +1246,89 @@ impl UiNode {
         }
     }
 
-    /// Recursively takes (see `Option::take`) the `.on_click(...)` closure out of
-    /// every node that was clicked this frame (see `is_clicked`, set in
-    /// `node_content_preparation`), pairing each with its `"/"`-separated path (see
-    /// `Ui::get_ui_node`) - `path` is this node's own path, extended with each
-    /// child's id as the walk descends.
-    ///
-    /// This only ever needs `&mut UiNode`, never `&mut App` - firing the collected
-    /// closures (and restoring them afterward via `restore_click_handler`) is a
-    /// separate step, see `App::fire_ui_click_handlers`. Splitting it this way -
-    /// instead of just calling `on_click(app)` straight from here - means
-    /// `app.ui.renderizable_elements` is never emptied or otherwise touched while a
-    /// handler runs, so a handler can freely look up and mutate *any* UI node via
-    /// `Ui::get_ui_node`, including its own node or one of its ancestors (e.g. a
-    /// button hiding the panel it's inside of).
-    pub(crate) fn take_click_handlers(&mut self, path: &str, out: &mut Vec<(String, Box<dyn FnMut(&mut App)>)>) {
+    /// The paths (see `find_mut`) of every node in this tree clicked this
+    /// frame that has an `.on_click(...)` - parents before their children, in
+    /// drawing order, so the last one is the one drawn on top. `path` is this
+    /// node's own; each child's is it plus `/id` ("" for a tree's root, whose
+    /// children are then just "id").
+    pub(crate) fn clicked_paths(&self, path: &str, out: &mut Vec<String>) {
         if !self.is_active {
             return;
         }
-        if self.is_clicked {
-            if let Some(on_click) = self.on_click.take() {
-                out.push((path.to_owned(), on_click));
-            }
+        if self.is_clicked && self.on_click.is_some() {
+            out.push(path.to_owned());
         }
-        if let UiNodeContent::Container(container) = &mut self.content {
-            for (id, child) in &mut container.children {
-                child.take_click_handlers(&format!("{path}/{id}"), out);
+        if let UiNodeContent::Container(container) = &self.content {
+            for (id, child) in &container.children {
+                let child_path = if path.is_empty() { id.clone() } else { format!("{path}/{id}") };
+                child.clicked_paths(&child_path, out);
             }
         }
     }
 
-    /// Puts an `.on_click(...)` closure taken by `take_click_handlers` back, so
-    /// future clicks keep working - see `App::fire_ui_click_handlers`.
-    pub(crate) fn restore_click_handler(&mut self, on_click: Box<dyn FnMut(&mut App)>) {
-        self.on_click = Some(on_click);
+    /// Every dropdown in this tree with an option picked from its list since
+    /// it was last asked: its path (see `clicked_paths`), the option, and its
+    /// `on_select` - see `App::fire_ui_click_handlers`.
+    pub(crate) fn picked_dropdowns(&self, path: &str, out: &mut Vec<(String, usize, crate::ui::widgets::dropdown::OnSelect)>) {
+        if let Some((index, on_select)) = self.dropdown.as_ref().and_then(|dropdown| dropdown.take_picked()) {
+            out.push((path.to_owned(), index, on_select));
+        }
+        if let UiNodeContent::Container(container) = &self.content {
+            for (id, child) in &container.children {
+                let child_path = if path.is_empty() { id.clone() } else { format!("{path}/{id}") };
+                child.picked_dropdowns(&child_path, out);
+            }
+        }
+    }
+
+    /// Takes its `.on_click(...)` out, to be run - see `App::fire_ui_click_handlers`.
+    pub(crate) fn take_click_handler(&mut self) -> Option<ClickHandler> {
+        self.on_click.take()
+    }
+
+    /// Puts an `.on_click(...)` taken by `take_click_handler` back, so later
+    /// clicks keep working - unless the handler gave the node a new one.
+    pub(crate) fn restore_click_handler(&mut self, on_click: ClickHandler) {
+        if self.on_click.is_none() {
+            self.on_click = Some(on_click);
+        }
+    }
+
+    /// The node at `path` in this tree - "" is this one, "panel/title" its
+    /// child "panel"'s child "title". None if there's no such node.
+    pub fn find(&self, path: &str) -> Option<&UiNode> {
+        if path.is_empty() {
+            return Some(self);
+        }
+        let (key, rest) = path.split_once('/').unwrap_or((path, ""));
+        let UiNodeContent::Container(container) = &self.content else { return None };
+        let (_, child) = container.children.iter().find(|(id, _)| id == key)?;
+        child.find(rest)
+    }
+
+    /// The node at `path` in this tree, to change - see `find`.
+    pub fn find_mut(&mut self, path: &str) -> Option<&mut UiNode> {
+        if path.is_empty() {
+            return Some(self);
+        }
+        let (key, rest) = path.split_once('/').unwrap_or((path, ""));
+        let UiNodeContent::Container(container) = &mut self.content else { return None };
+        let (_, child) = container.children.iter_mut().find(|(id, _)| id == key)?;
+        child.find_mut(rest)
+    }
+
+    /// Every image path this tree draws - for the scene's loading to load
+    /// them with its other assets.
+    pub(crate) fn collect_image_paths(&self, paths: &mut Vec<String>) {
+        match &self.content {
+            UiNodeContent::Image(image) => paths.push(image.path.clone()),
+            UiNodeContent::Container(container) => {
+                for (_, child) in &container.children {
+                    child.collect_image_paths(paths);
+                }
+            }
+            UiNodeContent::Text(_) => {}
+        }
     }
 
     // ── Vertex/Index helpers ──
@@ -1455,103 +1516,19 @@ impl UiNode {
         (vertices, indices)
     }
 
-    // ── Construction from RON ──
-
-    pub fn from_component(
-        component: &ui_structure::UiComponent,
-        font_system: &mut FontSystem,
-        screen_width: f32,
-        screen_height: f32,
-    ) -> Self {
-        let width = component.transform.size.as_ref().map(|s| s.width).unwrap_or(0.0);
-        let height = component.transform.size.as_ref().map(|s| s.height).unwrap_or(0.0);
-        let auto_size = component.transform.size.is_none();
-
-        let x = component.transform.position.x;
-        let y = component.transform.position.y;
-
-        // Parse self_anchor
-        let self_anchor = component.transform.self_anchor.clone().unwrap_or_default();
-        // Parse child_anchor
-        let child_anchor = component.transform.child_anchor.clone().unwrap_or_default();
-        // Parse direction
-        let direction = component.transform.direction.clone().unwrap_or_default();
-        // Parse fit
-        let fit = component.transform.fit.clone().unwrap_or_default();
-
-        let mut transform = UiTransform::new(x, y, height, width, 0.0, auto_size)
-            .with_anchors(self_anchor, child_anchor, direction, fit);
-
-        // Resolve on screen for top-level elements
-        transform.resolve_on_screen(screen_width, screen_height);
-
-        let mut style = Style::default();
-        let mut padding = Padding::default();
-
-        let content = match &component.content {
-            ui_structure::UiContent::Label(label_data) => {
-                let align = match label_data.alignment.as_deref() {
-                    Some("Center") => Align::Center,
-                    Some("Right") => Align::Right,
-                    _ => Align::Left,
-                };
-                style.background_color = Some(Fill::Solid(label_data.background_color.unwrap_or([0.0, 0.0, 0.0, 0.0]).into()));
-                style.border_color = Some(Fill::Solid(label_data.border_color.unwrap_or([0.0, 0.0, 0.0, 0.0]).into()));
-                style.text_color = Some(label_data.color.into());
-                style.font_size = Some(label_data.font_size);
-                style.align = Some(align);
-                UiNodeContent::Text(Label::new(
-                    font_system,
-                    &label_data.text,
-                    width,
-                    height,
-                ))
-            }
-            ui_structure::UiContent::Container(container_data) => {
-                style.background_color = Some(Fill::Solid(container_data.background_color.unwrap_or([0.0, 0.0, 0.0, 0.0]).into()));
-                style.border_color = Some(Fill::Solid(container_data.border_color.unwrap_or([0.0, 0.0, 0.0, 0.0]).into()));
-                padding = Padding::all(container_data.margin.unwrap_or(0.0));
-                let gap = container_data.gap.unwrap_or(0.0);
-
-                let children = if let Some(ron_children) = &container_data.children {
-                    // Note: ron_children is itself a HashMap<String, UiComponent> (see
-                    // ui_structure.rs), so RON-declared children still aren't ordered -
-                    // only code-first .set_child(...) is fixed by Container::children
-                    // being a Vec. Fixing RON too would need its schema to change from
-                    // a map to a list, which would break every existing .ron UI file.
-                    let mut children = Vec::new();
-                    for (child_id, child_component) in ron_children {
-                        children.push((
-                            child_id.clone(),
-                            UiNode::from_component(child_component, font_system, screen_width, screen_height),
-                        ));
-                    }
-                    children
-                } else {
-                    Vec::new()
-                };
-
-                UiNodeContent::Container(Container::new(gap, children))
-            }
-            ui_structure::UiContent::Image(image_data) => {
-                UiNodeContent::Image(ImageNode::new(image_data.path.clone()))
-            }
-        };
-
-        let mut node = Self::base(transform, style, content);
-        node.padding = padding;
-        node
-    }
-
     /// Create a label node from code, sized to fit `text` unless `width`/`height`
     /// are given explicitly - kept as constructor params (not deferred like
     /// `.set_size(...)`) since the label's `Buffer` needs a real size immediately to
-    /// measure/shape its text, and this constructor is also used by call sites that
-    /// never go through `Layer`/`resolve` (e.g. the loading screen, free camera HUD).
-    /// Everything else - position, color, font size, alignment, background, border,
-    /// hover, click - is set through the builder chain, e.g.
-    /// `UiNode::label(font_system, "Play", None, None).at(40.0, 40.0).set_text_color(...)`.
-    pub fn label(font_system: &mut FontSystem, text: &str, width: Option<f32>, height: Option<f32>) -> Self {
+    /// measure/shape its text. Everything else - position, color, font size,
+    /// alignment, background, border, hover, click - is set through the builder
+    /// chain, e.g. `UiNode::label("Play", None, None).set_text_color(...)`.
+    /// `widgets::text` is the usual way to make one.
+    pub fn label(text: &str, width: Option<f32>, height: Option<f32>) -> Self {
+        Self::label_with(&mut crate::rendering::ui::ui::font_system(), text, width, height)
+    }
+
+    /// `label`, with the font system already in hand.
+    pub(crate) fn label_with(font_system: &mut FontSystem, text: &str, width: Option<f32>, height: Option<f32>) -> Self {
         let auto_width = width.is_none();
         let (width, height) = Label::measure_or(font_system, text, width, height);
         let transform = UiTransform::new(0.0, 0.0, height, width, 0.0, false);
@@ -1603,7 +1580,7 @@ impl UiNode {
     /// only). Not resolved here - just recorded, since the parent's size usually
     /// isn't known yet at the point a node is being built as a plain value (see
     /// `resolve`, which every node goes through exactly once, top-down, from
-    /// `Layer::build`). `Percent`/`Fit` on a grandchild still resolves against `0.0`
+    /// the UI system when it lays a `UiLayer` out). `Percent`/`Fit` on a grandchild still resolves against `0.0`
     /// if the immediate parent is itself `Fit`-sized - its real size isn't known
     /// until the per-frame layout pass runs - use `SizeValue::Pixels` there for now.
     pub fn set_size(mut self, width: SizeValue, height: SizeValue) -> Self {
@@ -1627,7 +1604,7 @@ impl UiNode {
     /// was called) against `parent_width`/`parent_height`, then recurses into
     /// children (containers only) using this node's own just-resolved width/height
     /// as their parent size. Runs exactly once per node, top-down, starting from
-    /// `Layer::build` - not the same thing as the per-frame layout pass in
+    /// the UI system laying a `UiLayer` out (again after a resize) - not the same thing as the per-frame layout pass in
     /// `node_content_preparation`, which repositions children within their
     /// container's padding/gap/orientation every frame regardless.
     pub fn resolve(&mut self, parent_width: f32, parent_height: f32) {
@@ -1714,7 +1691,7 @@ impl UiNode {
     /// Mutates this node's *resting* style in place, for persistent state that
     /// isn't hover/press (a selected tab's border, a blinking alert, a fading
     /// subtitle) - the runtime equivalent of `.set_background_color(...)` etc. for
-    /// a node you already have `&mut` access to via `Ui::get_ui_node(...)`, in
+    /// a node you already have `&mut` access to via `UiLayer::get_mut(...)`, in
     /// place of reaching directly into `node.style.some_field = Some(x)`. Starts
     /// the closure from this node's *current* style (not `Style::default()`)
     /// since the point is changing specific fields while leaving the rest (e.g.
@@ -1766,15 +1743,23 @@ impl UiNode {
         self.material = material;
     }
 
-    /// Registers a callback that runs once, on the frame this node gets clicked
-    /// (mouse button pressed while over it - see the `is_clicked` hit-test in
-    /// `node_content_preparation`, and `App::fire_ui_click_handlers` for how it
-    /// actually gets called with `&mut App`). Same `ui.has_changed = true` every
-    /// frame requirement as `.on_hover(...)` - the hit-test only runs when the UI
-    /// pass does. Most closures won't need to capture anything - they just act
-    /// directly on `app`, e.g. `.on_click(|app| app.scene_manager.open_scene("playing"))`.
-    pub fn on_click(mut self, f: impl FnMut(&mut App) + 'static) -> Self {
-        self.on_click = Some(Box::new(f));
+    /// Runs `f` once on the frame this node is clicked (the left mouse button
+    /// pressed while over it - only the node drawn on top takes it). Like a
+    /// behavior's hooks, it gets the node whose `UiLayer` this is in (its own
+    /// UI: `node.get_property_mut::<UiLayer>()`, its behaviors:
+    /// `node.get_behavior_mut::<T>()`), the rest of the scene and the app:
+    ///
+    ///     button("Play", &style).on_click(|_node, _scene, app| app.scene_manager.open_scene("level_1"))
+    ///     button("Close", &style).on_click(|node, scene, _app| scene.despawn(&node.id))
+    pub fn on_click(mut self, f: impl FnMut(&mut Node, &mut SceneAccess, &mut App) + 'static) -> Self {
+        self.on_click = Some(ClickHandler::Node(Box::new(f)));
+        self
+    }
+
+    /// An engine widget's own click handler - needs only the app, so it also
+    /// works in the engine's own UI (a dropdown's list, a toast).
+    pub(crate) fn on_click_engine(mut self, f: impl FnMut(&mut App) + 'static) -> Self {
+        self.on_click = Some(ClickHandler::Engine(Box::new(f)));
         self
     }
 
@@ -1873,7 +1858,7 @@ impl UiNode {
     /// isn't a container. Replaces the existing entry in place (same position) if
     /// `id` was already used, same as a map's `insert` would. `id` still matters
     /// even though nothing cascades through it anymore (see `Style`'s doc comment) -
-    /// `Ui::get_ui_node`'s `"a/b/c"`-style path lookups depend on every child being
+    /// `UiLayer::get_mut`'s `"a/b/c"`-style path lookups depend on every child being
     /// addressable.
     ///
     /// `child` is a plain, already-built `UiNode` - any `.set_size(...)`/
@@ -1904,26 +1889,24 @@ impl UiNode {
     /// any explicit/auto width were sized for whatever font_size was in effect
     /// before this call (most commonly `DEFAULT_FONT_SIZE`), so a larger `size`
     /// would otherwise clip the text into invisibility instead of actually
-    /// growing to fit it. Needs `font_system` to re-measure the real natural
-    /// width at `size` (an approximation like scaling the old width by
-    /// `size`/old font_size would drift from font hinting) - every call site
-    /// already has one in scope (`app.ui.text.font_system`), same as `label(...)`
-    /// itself needs.
+    /// growing to fit it - re-measured at `size` with the engine's font system
+    /// (an approximation like scaling the old width by `size`/old font_size
+    /// would drift from font hinting).
     /// Which typeface/weight a label draws with (see `Font`) - inert on
     /// content types other than Text. Call before `.set_font_size(...)`, so
     /// that one sizes the box for this font's own glyph widths.
-    pub fn set_font(mut self, font_system: &mut FontSystem, font: Font) -> Self {
+    pub fn set_font(mut self, font: Font) -> Self {
         if let UiNodeContent::Text(label) = &mut self.content {
-            label.set_font(font_system, font);
+            label.set_font(font);
         }
         self
     }
 
-    pub fn set_font_size(mut self, font_system: &mut FontSystem, size: f32) -> Self {
+    pub fn set_font_size(mut self, size: f32) -> Self {
         self.style.font_size = Some(size);
         if let UiNodeContent::Text(label) = &self.content {
             let min_height = min_height_for_font_size(size);
-            let min_width = label.natural_width_at(font_system, size);
+            let min_width = label.natural_width_at(&mut crate::rendering::ui::ui::font_system(), size);
             if min_height > self.transform.height {
                 self.transform.height = min_height;
             }
@@ -1943,10 +1926,10 @@ impl UiNode {
     /// color, alignment (see `TextStyle`). Inert on content types other than
     /// Text. Like `.set_font_size(...)`, grows the box to fit the text at the
     /// new font and size - call `.set_padding(...)` after it.
-    pub fn set_text_style(self, font_system: &mut FontSystem, style: &TextStyle) -> Self {
+    pub fn set_text_style(self, style: &TextStyle) -> Self {
         // Font before size - set_font_size sizes the box for this font's glyphs.
-        self.set_font(font_system, style.font)
-            .set_font_size(font_system, style.size)
+        self.set_font(style.font)
+            .set_font_size(style.size)
             .set_text_color(style.color)
             .set_align(style.align)
     }

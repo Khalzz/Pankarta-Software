@@ -1,15 +1,12 @@
 use nalgebra::{Vector3};
 use pankarta_software::app::App;
 use pankarta_software::input::source::{InputSource, Key};
-use pankarta_software::input::input;
-use pankarta_software::rendering::ui::ui::Ui;
 use pankarta_software::scene_manager::behavior::Behavior;
 use pankarta_software::scene_manager::node::Node;
-use pankarta_software::scene_manager::node::properties::{rotation_from_degrees, CameraLens, Light, LookAt, Model, Shape2D, Transform2D, Transform3D};
-use pankarta_software::resources::ModelSource;
+use pankarta_software::scene_manager::node::properties::{rotation_from_degrees, CameraLens, Light, LookAt, Model, Transform3D, UiLayer};
 use pankarta_software::scene_manager::scene::SceneBehaviour;
 use pankarta_software::ui::TextStyle;
-use pankarta_software::ui::layer::Layer;
+use pankarta_software::ui::ui_node::UiNode;
 use pankarta_software::ui::ui_transform::SizeValue;
 use pankarta_software::ui::widgets::text;
 
@@ -28,9 +25,9 @@ struct CameraMovement {
 }
 
 impl Behavior for CameraMovement {
-  fn update(&mut self, node: &mut Node, scene: &mut pankarta_software::scene_manager::scene_access::SceneAccess, _app: &mut App) {
-    self.yaw += input::mouse_rel_x() as f32 * self.sensitivity;
-    self.pitch = (self.pitch + input::mouse_rel_y() as f32 * self.sensitivity).clamp(-1.5, 1.5);
+  fn update(&mut self, node: &mut Node, scene: &mut pankarta_software::scene_manager::scene_access::SceneAccess, app: &mut App) {
+    self.yaw += app.input.mouse_rel_x() as f32 * self.sensitivity;
+    self.pitch = (self.pitch + app.input.mouse_rel_y() as f32 * self.sensitivity).clamp(-1.5, 1.5);
 
     let center = scene.get_node("plane").unwrap().get_property::<Transform3D>().unwrap().position;
 
@@ -59,16 +56,16 @@ struct ModelViewer {
 impl SceneBehaviour for ModelViewer {
   fn on_spawn(&mut self, scene: &mut pankarta_software::scene_manager::scene::Scene, app: &mut App) {
 
-    let framerate_label = text(app, "600 fps", &TextStyle::default())
+    let framerate_label = text("600 fps", &TextStyle::default())
         .set_padding((10.0, 10.0))
         .set_size(SizeValue::Pixels(200.0), SizeValue::Fit);
-
-    Layer::new(app).set_child("framerate", framerate_label).build(app);
+    let hud = Node::new("hud").with_property(UiLayer::new(UiNode::container().set_child("framerate", framerate_label)));
+    scene.spawn_node(app, hud).unwrap();
 
     app.window.set_cursor_locked(true);
 
     let model_node = Node::new("plane")
-      .with_property(Model::new(ModelSource::file("models/f16.glb")).scaled(15.0)) // the file is ~1 unit long; an F-16 is ~15 m
+      .with_property(Model::file("models/f16.glb").transform(Transform3D { scale: Vector3::new(15.0, 15.0, 15.0), ..Default::default() })) // the file is ~1 unit long; an F-16 is ~15 m
       .with_property(Transform3D { position: Vector3::new(0.0,0.0,0.0), rotation: rotation_from_degrees(Vector3::new(0.0, 0.0, 0.0)), scale: Vector3::new(1.0,1.0,1.0), });
 
     scene.spawn_node(app, model_node).unwrap();
@@ -88,9 +85,9 @@ impl SceneBehaviour for ModelViewer {
   }
 
   fn update(&mut self, scene: &mut pankarta_software::prelude::Scene, app: &mut App, ctx: &mut pankarta_software::prelude::FrameContext) {
-      if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "framerate").and_then(|node| node.as_label_mut()) {
+      if let Some(label) = scene.get_node_mut("hud").and_then(|node| node.get_property_mut::<UiLayer>()).and_then(|ui| ui.label_mut("framerate")) {
           let fps = app.time.fps().round();
-          label.set_text(&mut app.ui.text.font_system, &format!("{fps} fps"), true);
+          label.set_text(format!("{fps} fps"));
       }
   }
 }
@@ -111,10 +108,10 @@ async fn main() {
 
 
     // Input binding setup
-    input::bind("Left", InputSource::key(Key::A));
-    input::bind("Right", InputSource::key(Key::D));
-    input::bind("Up", InputSource::key(Key::W));
-    input::bind("Down", InputSource::key(Key::S));
+    app.input.bind("Left", InputSource::key(Key::A));
+    app.input.bind("Right", InputSource::key(Key::D));
+    app.input.bind("Up", InputSource::key(Key::W));
+    app.input.bind("Down", InputSource::key(Key::S));
 
     // creating and openning the scene
     app.scene_manager.create_scene("main", |_scene, _app| {      

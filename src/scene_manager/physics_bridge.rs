@@ -2,11 +2,9 @@ use std::collections::HashMap;
 
 use nalgebra::Vector3;
 
-use crate::game_nodes::game_object::{Collider, ColliderShape, Physics};
+use crate::physics::{Collider, ColliderShape, Physics};
 use crate::physics::physics_resources::PhysicsObjectDef;
-use crate::resources;
 
-use super::node::properties::Model;
 use super::scene::Scene;
 
 /// Bridges a spawned `Node`'s `Transform3D`+`Physics` properties into a
@@ -15,7 +13,7 @@ use super::scene::Scene;
 /// it has, the node's spawn hands it on (see `Scene::spawn_one`). Mirrors
 /// `render_bridge::register_static_model`'s role for rendering - same
 /// "extract once at spawn time" shape, just building a `PhysicsObjectDef`
-/// instead of a `GameObject`.
+/// instead of an `InstanceData`.
 ///
 /// Also where `ColliderShape::TrimeshFromModel` gets resolved into a real
 /// `ColliderShape::Trimesh` (see that variant's own doc comment) - reading
@@ -34,11 +32,8 @@ pub fn register_physics_body(scene: &mut Scene, id: &str, trimeshes: &TrimeshCac
     let transform = *node.transform_3d().ok_or_else(|| format!("node '{id}' has no Transform3D property"))?;
     let mut physics = node.get_property::<Physics>().ok_or_else(|| format!("node '{id}' has no Physics property"))?.clone();
 
-    // Geometry read from a model file is scaled the way the model is drawn:
-    // node scale, times the node's Model's own scale when it has one.
-    let geometry_scale = node.get_property::<Model>()
-        .map(|model| model.render_scale(transform.scale))
-        .unwrap_or(transform.scale);
+    // Geometry read from a model file is scaled the way the model is drawn.
+    let geometry_scale = transform.scale.component_mul(&super::render_bridge::geometry_scale(node));
     physics.colliders = physics.colliders.into_iter()
         .map(|collider| resolve_collider(collider, geometry_scale, id, trimeshes))
         .collect();
@@ -65,7 +60,7 @@ pub(crate) fn trimesh_paths(physics: &Physics) -> impl Iterator<Item = &str> {
 
 /// Reads the mesh at `model_path` (inside the assets folder) for a collider.
 pub(crate) fn load_trimesh(model_path: &str) -> Result<Trimesh, String> {
-    resources::load_trimesh_geometry(model_path).map_err(|error| error.to_string())
+    crate::asset_manager::gltf::load_trimesh_geometry(model_path).map_err(|error| error.to_string())
 }
 
 fn resolve_collider(mut collider: Collider, scale: Vector3<f32>, id: &str, trimeshes: &TrimeshCache) -> Collider {

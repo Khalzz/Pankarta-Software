@@ -1,0 +1,21 @@
+// sign_glass.wgsl's settings - see engine::rendering::shader_library.
+(
+    // Its own pass after the solid world (see the frame plan in scene.rs),
+    // so what's behind the glass is drawn already.
+    pass: "hud",
+    blend: Alpha,
+    // See-through: it mustn't hide what's behind it.
+    depth_write: false,
+    casts_shadows: false,
+    cull: None,
+    params: {
+        "center": (0.0, 0.0, 0.0),
+        "forward": (0.0, 0.0, 1.0),
+        "up": (0.0, 1.0, 0.0),
+        "right": (-1.0, 0.0, 0.0),
+        "distance": 1.5,
+        "size": (4.0, 2.5),
+        "glass_tint": (0.45, 0.65, 0.75, 0.10),
+        "brightness": 1.3,
+    },
+)

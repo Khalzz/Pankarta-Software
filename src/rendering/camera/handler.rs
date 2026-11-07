@@ -1,10 +1,10 @@
 use std::collections::HashMap;
-use nalgebra::{Matrix4, Point3, Quaternion, UnitQuaternion, Vector3};
+use nalgebra::{Matrix4, Point3, UnitQuaternion, Vector3};
 use sdl2::rect::Point;
 use wgpu::{util::DeviceExt, BindGroup, BindGroupLayout, BindGroupLayoutDescriptor, Buffer, Device, Queue};
 use crate::rendering::instance_management::InstanceData;
 use crate::utils::lerps::{lerp, lerp_point3, smoothstep};
-use crate::transform::Transform;
+use crate::scene_manager::node::properties::Transform3D;
 
 use super::camera::Camera;
 use super::projection::Projection;
@@ -46,8 +46,7 @@ struct CameraTransition {
 pub enum LookAtTarget {
     Point(Point3<f32>),
     // A renderizable instance's id (see `Scene::spawn_node`'s `Model`
-    // registration, or a `data.ron`-loaded object) - resolved via its live
-    // `transform.position` each frame.
+    // registration) - resolved via its live `transform.position` each frame.
     Node(String),
 }
 
@@ -252,12 +251,12 @@ impl SceneCameras {
         // Placeholder so active()'s .expect() has something to find before
         // this scene creates its own first camera - never meant to be seen,
         // the render loop skips drawing while this is active.
-        cameras.create_camera(NO_CAMERA_SENTINEL, Transform::new(Vector3::new(0.0, 0.0, 0.0), Quaternion::identity(), Vector3::new(1.0, 1.0, 1.0)), 45.0);
+        cameras.create_camera(NO_CAMERA_SENTINEL, Transform3D::default(), 45.0);
         cameras
     }
 
-    /// Registers (or replaces) a named camera from a `Transform` (the same
-    /// type `data.ron`-sourced objects use) - held on `Camera` as-is now, no
+    /// Registers (or replaces) a named camera from a `Transform3D` - held on
+    /// `Camera` as-is, no
     /// decomposition happens here; yaw/pitch are derived lazily (see
     /// `Camera::yaw`/`pitch`) only when something actually needs them.
     /// `transform.scale` is ignored entirely (meaningless for a camera).
@@ -274,7 +273,7 @@ impl SceneCameras {
     /// a scene with exactly one camera of its own never needs its own
     /// `select_camera` call. A second `create_camera` doesn't repeat that -
     /// choosing between a scene's own cameras still needs `select_camera`.
-    pub(crate) fn create_camera(&mut self, name: impl Into<String>, transform: Transform, fovy: f32) -> &mut CameraInstance {
+    pub(crate) fn create_camera(&mut self, name: impl Into<String>, transform: Transform3D, fovy: f32) -> &mut CameraInstance {
         let camera = Camera::new(transform);
         // Far plane kept in sync with CameraResources::new's near_far_uniform
         // and water.wgsl's `const FAR` - see the comment there.
@@ -365,8 +364,8 @@ impl SceneCameras {
         if self.get(TRANSITION_CAMERA_NAME).is_none() {
             // Rotation here is a throwaway identity - overwritten field-by-field
             // right below with yaw/pitch already lerped as radians, no reason to
-            // route those back through a Transform/degrees round-trip.
-            self.create_camera(TRANSITION_CAMERA_NAME, Transform::new(position.coords, Quaternion::identity(), Vector3::new(1.0, 1.0, 1.0)), fovy);
+            // route those back through a Transform3D/degrees round-trip.
+            self.create_camera(TRANSITION_CAMERA_NAME, Transform3D { position: position.coords, ..Default::default() }, fovy);
         }
         // yaw/pitch computed above are already radians (same units Camera's
         // own accessors always work in) - set directly rather than going
@@ -405,7 +404,7 @@ impl SceneCameras {
     /// `Scene::sync_cameras`.
     pub(crate) fn place(&mut self, name: &str, position: Vector3<f32>, rotation: UnitQuaternion<f32>, fovy: f32, znear: f32, viewport: Option<(u32, u32)>) {
         if !self.cameras.contains_key(name) {
-            self.create_camera(name, Transform::new(position, Quaternion::identity(), Vector3::new(1.0, 1.0, 1.0)), fovy);
+            self.create_camera(name, Transform3D { position, ..Default::default() }, fovy);
         }
         let (width, height) = viewport.unwrap_or((self.width, self.height));
         let Some(instance) = self.cameras.get_mut(name) else { return };
@@ -414,6 +413,23 @@ impl SceneCameras {
         instance.projection.fovy = fovy;
         instance.projection.znear = znear;
         instance.projection.resize(width.max(1), height.max(1));
+    }
+
+    /// Moves every camera by `shift` - where it is, the point it looks at,
+    /// and where a transition started from - for the floating origin (see
+    /// `WorldOrigin`).
+    pub(crate) fn shift_origin(&mut self, shift: Vector3<f32>) {
+        for instance in self.cameras.values_mut() {
+            let position = instance.camera.position();
+            instance.camera.set_position(position + shift);
+            if let Some(LookAtTarget::Point(point)) = &mut instance.look_at {
+                *point += shift;
+            }
+        }
+        if let Some(transition) = &mut self.transition {
+            let position = transition.from.position();
+            transition.from.set_position(position + shift);
+        }
     }
 
     pub fn names(&self) -> impl Iterator<Item = &str> {
@@ -477,7 +493,7 @@ impl SceneCameras {
             let Some(target) = &instance.look_at else { continue };
             let target_point = match target {
                 LookAtTarget::Point(point) => Some(*point),
-                LookAtTarget::Node(id) => renderizable_instances.get(id).map(|renderizable| Point3::from(renderizable.instance.transform.position)),
+                LookAtTarget::Node(id) => renderizable_instances.get(id).map(|renderizable| Point3::from(renderizable.transform.position)),
             };
             if let Some(target_point) = target_point {
                 instance.camera.look_at(target_point);

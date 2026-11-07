@@ -4,20 +4,18 @@
 //! `node_content_preparation`. That's what lets a hover override apply uniformly to
 //! every content type without `Label` needing its own copy/restore logic.
 //!
-//! - `Label::new(font_system, text, width, height)` - builds the glyphon `Buffer` at
-//!   `DEFAULT_FONT_SIZE`; the owning `UiNode`'s actual font size/alignment take over
-//!   before this is ever rendered, see `apply_style`.
-//! - `measure_or(...)` - auto-measures whichever of width/height the caller left as
-//!   `None`, used by `UiNode::label`.
-//! - `apply_style(font_system, font_size, align)` - re-shapes the buffer at a given
-//!   size/alignment, called fresh every frame from the owning node's resolved style.
-//! - `text_area`/`ui_node_data_creation` - build the glyphon `TextArea` (and vertex/
-//!   index data) this frame's render pass needs, given a resolved `color`.
-//! - `set_text(font_system, text, realign)` - changes the displayed text in place
-//!   (a no-op if it's unchanged); `get_text_width` reads back the shaped result.
-//! - `set_font(font_system, font)` - which typeface/weight to shape with (see
-//!   `Font`); unlike size/color it lives here, since it's rarely changed and
-//!   never hover-driven.
+//! Text is shaped with the engine's one font system (see
+//! `rendering::ui::ui::font_system`), so nothing here needs one passed in:
+//! - `set_text(text)` - changes the displayed text in place (a no-op if it's
+//!   unchanged); `get_text_width` reads back the shaped result.
+//! - `set_font(font)` - which typeface/weight to shape with (see `Font`);
+//!   unlike size/color it lives here, since it's rarely changed and never
+//!   hover-driven.
+//! - `text_width(text, size, font)` - how wide a line of text is, for sizing
+//!   something to fit it.
+//!
+//! The `_with` variants take the font system explicitly - for the UI's own
+//! drawing pass, which already holds it.
 
 use glyphon::{cosmic_text::Align, Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, TextArea, TextBounds, Weight};
 
@@ -94,7 +92,12 @@ pub fn min_height_for_font_size(font_size: f32) -> f32 {
 // the point of calling this) current box width would clip it to.
 /// How wide `text` is on one line at `font_size` in `font` (px) - for
 /// sizing something to fit it.
-pub fn text_width(font_system: &mut FontSystem, text: &str, font_size: f32, font: Font) -> f32 {
+pub fn text_width(text: &str, font_size: f32, font: Font) -> f32 {
+    natural_line_width(&mut crate::rendering::ui::ui::font_system(), text, font_size, font)
+}
+
+/// `text_width`, with the font system already in hand.
+pub(crate) fn text_width_with(font_system: &mut FontSystem, text: &str, font_size: f32, font: Font) -> f32 {
     natural_line_width(font_system, text, font_size, font)
 }
 
@@ -128,7 +131,7 @@ impl Label {
     /// left as `None`. Width is measured from the text's own natural (unwrapped)
     /// layout; height just falls back to `AUTO_HEIGHT` (see its doc comment for why
     /// auto height doesn't attempt to support multi-line text).
-    pub fn measure_or(font_system: &mut FontSystem, text: &str, width: Option<f32>, height: Option<f32>) -> (f32, f32) {
+    pub(crate) fn measure_or(font_system: &mut FontSystem, text: &str, width: Option<f32>, height: Option<f32>) -> (f32, f32) {
         let resolved_height = height.unwrap_or(AUTO_HEIGHT);
         let resolved_width = match width {
             Some(w) => w,
@@ -141,7 +144,7 @@ impl Label {
     /// `node_content_preparation` calls `apply_style` before this label is ever
     /// rendered, so the real font size/alignment (from the owning UiNode's resolved
     /// Style) takes over before anyone sees this initial state.
-    pub fn new(font_system: &mut FontSystem, text: &str, width: f32, height: f32) -> Self {
+    pub(crate) fn new(font_system: &mut FontSystem, text: &str, width: f32, height: f32) -> Self {
         let mut buffer = Buffer::new(font_system, Metrics::new(DEFAULT_FONT_SIZE, DEFAULT_FONT_SIZE * LINE_HEIGHT_RATIO));
 
         buffer.set_size(font_system, Some(width), Some(height));
@@ -163,7 +166,12 @@ impl Label {
     }
 
     /// Switches the typeface/weight and re-shapes the current text with it.
-    pub fn set_font(&mut self, font_system: &mut FontSystem, font: Font) {
+    pub fn set_font(&mut self, font: Font) {
+        self.set_font_with(&mut crate::rendering::ui::ui::font_system(), font);
+    }
+
+    /// `set_font`, with the font system already in hand.
+    pub(crate) fn set_font_with(&mut self, font_system: &mut FontSystem, font: Font) {
         if font != self.font {
             self.font = font;
             self.buffer.set_text(font_system, &self.text, &font.attrs(), Shaping::Advanced);
@@ -178,7 +186,7 @@ impl Label {
     /// font_size/width it had before, most commonly `DEFAULT_FONT_SIZE`'s natural
     /// width from `measure_or`). Doesn't touch `self.buffer` - see
     /// `natural_line_width`.
-    pub fn natural_width_at(&self, font_system: &mut FontSystem, font_size: f32) -> f32 {
+    pub(crate) fn natural_width_at(&self, font_system: &mut FontSystem, font_size: f32) -> f32 {
         natural_line_width(font_system, &self.text, font_size, self.font)
     }
 
@@ -187,7 +195,7 @@ impl Label {
     /// owning node's resolved `Style` says this frame (its own, or hover-
     /// overridden), so leaving hover naturally re-shapes back to the resting value
     /// next frame - no restore bookkeeping needed.
-    pub fn apply_style(&mut self, font_system: &mut FontSystem, font_size: f32, align: Align) {
+    pub(crate) fn apply_style(&mut self, font_system: &mut FontSystem, font_size: f32, align: Align) {
         self.buffer.set_metrics(font_system, Metrics::new(font_size, font_size * LINE_HEIGHT_RATIO));
         self.buffer.lines.iter_mut().for_each(|line| {
             line.set_align(Some(align));
@@ -271,22 +279,21 @@ impl Label {
         (rect.bottom - (rect.bottom - rect.top) / 2.0) - (self.buffer.metrics().line_height / 2.0)
     }
 
-    pub fn set_text(&mut self, font_system: &mut FontSystem, text: &str, realign: bool) {
+    /// Shows `text` instead - a no-op if it's what's shown already. Its box
+    /// stays the size it is (see `UiNode::set_size` for a fixed width that
+    /// fits longer text).
+    pub fn set_text(&mut self, text: impl AsRef<str>) {
+        let text = text.as_ref();
         if text != self.text {
-            self.text = text.to_owned();
-            self.buffer.set_text(font_system, text, &self.font.attrs(), Shaping::Advanced);
-            if realign {
-                self.realign(font_system);
-            }
+            self.set_text_with(&mut crate::rendering::ui::ui::font_system(), text);
         }
     }
 
-    pub fn realign(&mut self, font_system: &mut FontSystem) {
-        self.buffer.lines.iter_mut().for_each(|line| {
-            line.set_align(Some(Align::Center));
-        });
-
-        self.buffer.set_wrap(font_system, glyphon::Wrap::None);
-        self.buffer.shape_until_scroll(font_system, true);
+    /// `set_text`, with the font system already in hand.
+    pub(crate) fn set_text_with(&mut self, font_system: &mut FontSystem, text: &str) {
+        if text != self.text {
+            self.text = text.to_owned();
+            self.buffer.set_text(font_system, text, &self.font.attrs(), Shaping::Advanced);
+        }
     }
 }

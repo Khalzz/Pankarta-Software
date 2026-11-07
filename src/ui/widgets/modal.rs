@@ -1,16 +1,19 @@
-//! A dialog over everything else: a screen-wide backdrop dimming what's
-//! behind, with a card in the middle. While it's open nothing behind it can be
-//! hovered or clicked - only the modal itself.
+//! A dialog's look: a screen-wide backdrop dimming what's behind, with a card
+//! in the middle. A modal is a node - its `UiLayer` over the rest
+//! (`z_index`), keeping hover and clicks from what's behind it
+//! (`blocks_input`). Spawning it opens it; despawning it closes it:
 //!
 //!     let content = UiNode::container()
-//!         .set_child("message", label)
-//!         .set_child("ok", button(app, "OK", &ButtonStyle::default())
-//!             .on_click(|app| close_modal(app, "confirm")));
-//!     open_modal(app, "confirm", modal(content, &ModalStyle::default()));
+//!         .set_child("message", text("Quit the game?", &TextStyle::default()))
+//!         .set_child("ok", button("OK", &ButtonStyle::default())
+//!             .on_click(|node, scene, _app| scene.despawn(&node.id)));
+//!     scene.spawn(Node::new("confirm").with_property(
+//!         UiLayer::new(modal(content, &ModalStyle::default())).z_index(100).blocks_input(true),
+//!     ));
 //!
-//! Its nodes are found under its id like any other UI: "confirm/card/content/ok".
+//! Its nodes are under the layer's root like any other: "card/content/ok".
+//! Whether it's open: `scene.get_node("confirm").is_some()`.
 
-use crate::app::App;
 use crate::ui::color::{Fill, UiColor};
 use crate::ui::ui_node::UiNode;
 use crate::ui::ui_transform::{Anchor, PositionValue, SizeValue};
@@ -63,7 +66,7 @@ impl ModalStyle {
 }
 
 /// `content` in a card in the middle of a screen-wide backdrop, looking like
-/// `style` - show it with `open_modal`.
+/// `style` - the root of a modal's `UiLayer` (see the module doc).
 pub fn modal(content: UiNode, style: &ModalStyle) -> UiNode {
     let backdrop = UiNode::container()
         .set_size(SizeValue::Percent(100.0), SizeValue::Percent(100.0))
@@ -79,28 +82,4 @@ pub fn modal(content: UiNode, style: &ModalStyle) -> UiNode {
     backdrop
         .set_transition(style.fade_in_ms)
         .set_enter(|enter| enter.set_background_color(UiColor::TRANSPARENT).set_background_blur(0.0))
-}
-
-/// Shows `modal` (see `modal`) over everything, under `id` - replacing one
-/// already open under the same id.
-pub fn open_modal(app: &mut App, id: &str, mut modal: UiNode) {
-    let (width, height) = app.ui.size();
-    modal.resolve(width, height);
-    app.ui.add_to_ui(id.to_owned(), modal);
-    if !app.ui.always_on_top.iter().any(|key| key == id) {
-        app.ui.always_on_top.push(id.to_owned());
-    }
-    app.ui.has_changed = true;
-}
-
-/// Closes the modal open under `id`, if there is one - e.g. from one of its
-/// own buttons' `on_click`.
-pub fn close_modal(app: &mut App, id: &str) {
-    app.ui.renderizable_elements.remove(id);
-    app.ui.always_on_top.retain(|key| key != id);
-    app.ui.has_changed = true;
-}
-
-pub fn is_modal_open(app: &App, id: &str) -> bool {
-    app.ui.always_on_top.iter().any(|key| key == id) && app.ui.renderizable_elements.contains_key(id)
 }

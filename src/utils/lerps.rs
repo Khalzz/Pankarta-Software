@@ -5,9 +5,6 @@ pub fn lerp(start: f32, end: f32, t: f32) -> f32 {
     start + (end - start) * t
 }
 
-/// Eases a 0..1 progress value with a soft start/end (0 and 1 slopes both flatten
-/// out) instead of the linear ramp `t` would give - clamps out-of-range input so
-/// callers can pass a raw `elapsed / duration` without pre-clamping it themselves.
 pub fn smoothstep(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)

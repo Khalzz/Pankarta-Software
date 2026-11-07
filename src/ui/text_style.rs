@@ -8,7 +8,7 @@
 //!     let body = TextStyle::default().size(14.0);
 //!     let heading = body.clone().size(22.0).weight(Weight::BOLD);
 //!
-//!     text(app, "Settings", &heading)
+//!     text("Settings", &heading)
 //!     ButtonStyle::default().text(|_| body.clone())
 
 use glyphon::Weight;

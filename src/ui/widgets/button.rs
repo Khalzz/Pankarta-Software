@@ -1,6 +1,6 @@
 //! A clickable text button.
 //!
-//!     button(app, "Play", &ButtonStyle::default()).on_click(|app| ...)
+//!     button("Play", &ButtonStyle::default()).on_click(|node, scene, app| ...)
 //!
 //! `ButtonStyle::default()` is the engine's base look. A game makes its own
 //! from it, changing only what it wants - with the builder methods, or struct
@@ -15,7 +15,6 @@
 //! It's a plain `UiNode` once built, so any `UiNode` builder call still works
 //! on it afterwards (`.set_child`, `.active`, another `.on_hover`...).
 
-use crate::app::App;
 use crate::ui::color::{Fill, UiColor};
 use crate::ui::text_style::TextStyle;
 use crate::ui::ui_node::{Style, UiNode};
@@ -161,15 +160,14 @@ impl ButtonStyle {
 
 /// A button showing `text`, looking like `style` - chain `.on_click(...)` on
 /// it for what it does.
-pub fn button(app: &mut App, text: &str, style: &ButtonStyle) -> UiNode {
-    let font_system = &mut app.ui.text.font_system;
+pub fn button(text: &str, style: &ButtonStyle) -> UiNode {
     let hover = style.hover.clone();
     let press = style.press.clone();
     let disabled = style.disabled.clone();
     // Padding after the text style, so it grows the box around the text's
     // real size.
-    let node = UiNode::label(font_system, text, None, None)
-        .set_text_style(font_system, &style.text)
+    let node = UiNode::label(text, None, None)
+        .set_text_style(&style.text)
         .set_padding(style.padding)
         .set_background_color(style.background.clone())
         .set_border_color(style.border_color.clone())

@@ -1,8 +1,8 @@
 //! A box showing one choice of several, opening a list of them when
 //! clicked.
 //!
-//!     dropdown(app, &["Low", "Medium", "High"], 1, &DropdownStyle::default())
-//!         .on_select(|app, index| set_quality(app, index))
+//!     dropdown(&["Low", "Medium", "High"], 1, &DropdownStyle::default())
+//!         .on_select(|_node, _scene, app, index| set_quality(app, index))
 //!
 //! The list opens under it (or over it, near the bottom of the screen),
 //! drawn over the rest of the UI - modals included - and scrolls when it has
@@ -19,6 +19,8 @@ use glyphon::FontSystem;
 
 use crate::app::App;
 use crate::rendering::shader_library::ShaderLibrary;
+use crate::scene_manager::node::Node;
+use crate::scene_manager::scene_access::SceneAccess;
 use crate::scene_manager::node::properties::Material;
 use crate::ui::color::{Fill, UiColor};
 use crate::ui::text_style::TextStyle;
@@ -129,24 +131,24 @@ impl DropdownStyle {
 }
 
 /// What runs when an option is picked - see `UiNode::on_select`.
-type OnSelect = Rc<RefCell<Option<Box<dyn FnMut(&mut App, usize)>>>>;
+pub(crate) type OnSelect = Rc<RefCell<Option<Box<dyn FnMut(&mut Node, &mut SceneAccess, &mut App, usize)>>>>;
 
 /// A dropdown of `options`, `selected` chosen, looking like `style`.
-pub fn dropdown(app: &mut App, options: &[&str], selected: usize, style: &DropdownStyle) -> UiNode {
+pub fn dropdown(options: &[&str], selected: usize, style: &DropdownStyle) -> UiNode {
     let options: Rc<Vec<String>> = Rc::new(options.iter().map(|option| option.to_string()).collect());
     let state = DropdownState {
         options: Rc::clone(&options),
         selected: Rc::new(Cell::new(selected.min(options.len().saturating_sub(1)))),
         rect: Rc::new(Cell::new([0.0; 4])),
         on_select: Rc::new(RefCell::new(None)),
+        picked: Rc::new(Cell::new(None)),
     };
     let list_key = format!("__dropdown{}", NEXT_ID.fetch_add(1, Ordering::Relaxed));
 
-    let font_system = &mut app.ui.text.font_system;
     let shown = options.get(state.selected.get()).map_or("", String::as_str);
     let faint = UiColor::Rgba(255, 255, 255, 60);
-    let label = UiNode::label(font_system, shown, None, None)
-        .set_text_style(font_system, &style.text.align(Align::Left))
+    let label = UiNode::label(shown, None, None)
+        .set_text_style(&style.text.align(Align::Left))
         .set_size(SizeValue::Grow, SizeValue::Fit)
         .on_disabled(|disabled| disabled.set_text_color(faint));
     // Drawn by its shader in its own background color.
@@ -157,8 +159,8 @@ pub fn dropdown(app: &mut App, options: &[&str], selected: usize, style: &Dropdo
         .on_disabled(|disabled| disabled.set_background_color(faint));
 
     let open = {
-        let (options, selected, rect, on_select, style) = (Rc::clone(&options), Rc::clone(&state.selected), Rc::clone(&state.rect), Rc::clone(&state.on_select), style.clone());
-        move |app: &mut App| open_list(app, &list_key, &options, &selected, rect.get(), &on_select, &style)
+        let (options, selected, rect, picked, style) = (Rc::clone(&options), Rc::clone(&state.selected), Rc::clone(&state.rect), Rc::clone(&state.picked), style.clone());
+        move |app: &mut App| open_list(app, &list_key, &options, &selected, rect.get(), &picked, &style)
     };
 
     let hover = style.hover_background.clone();
@@ -178,14 +180,14 @@ pub fn dropdown(app: &mut App, options: &[&str], selected: usize, style: &Dropdo
         .set_cursor(CursorIcon::Pointer)
         .set_child("value", label)
         .set_child("chevron", chevron)
-        .on_click(open)
+        .on_click_engine(open)
         .with_dropdown(state)
 }
 
 /// Opens the list of `options` under (or over) the box at `rect` - a
 /// screen-wide, invisible node holding it, so a click anywhere else lands on
 /// that and closes it.
-fn open_list(app: &mut App, key: &str, options: &Rc<Vec<String>>, selected: &Rc<Cell<usize>>, rect: [f32; 4], on_select: &OnSelect, style: &DropdownStyle) {
+fn open_list(app: &mut App, key: &str, options: &Rc<Vec<String>>, selected: &Rc<Cell<usize>>, rect: [f32; 4], picked: &Rc<Cell<Option<usize>>>, style: &DropdownStyle) {
     let [left, top, right, bottom] = rect;
     let width = (right - left).max(1.0);
 
@@ -210,15 +212,16 @@ fn open_list(app: &mut App, key: &str, options: &Rc<Vec<String>>, selected: &Rc<
         .set_corner_radius(style.corner_radius);
     let mut row_height = 0.0f32;
     for (index, option) in options.iter().enumerate() {
-        let (key, selected, on_select) = (key.to_owned(), Rc::clone(selected), Rc::clone(on_select));
-        let row = button(app, option, if index == selected.get() { &selected_style } else { &row_style })
+        let (key, selected, picked) = (key.to_owned(), Rc::clone(selected), Rc::clone(picked));
+        // The list is the engine's own UI - the dropdown's `on_select` runs
+        // right after, from its layer (see `App::fire_ui_click_handlers`),
+        // where it gets its node and scene.
+        let row = button(option, if index == selected.get() { &selected_style } else { &row_style })
             .set_size(SizeValue::Grow, SizeValue::Fit)
-            .on_click(move |app| {
+            .on_click_engine(move |app| {
                 selected.set(index);
+                picked.set(Some(index));
                 close_list(app, &key);
-                if let Some(f) = on_select.borrow_mut().as_mut() {
-                    f(app, index);
-                }
             });
         row_height = row_height.max(row.transform.height);
         list = list.set_child(format!("option{index}"), row);
@@ -242,7 +245,7 @@ fn open_list(app: &mut App, key: &str, options: &Rc<Vec<String>>, selected: &Rc<
     let mut catcher = UiNode::container()
         .set_size(SizeValue::Percent(100.0), SizeValue::Percent(100.0))
         .set_position(PositionValue::Start(0.0), PositionValue::Start(0.0))
-        .on_click(move |app| close_list(app, &close_key))
+        .on_click_engine(move |app| close_list(app, &close_key))
         .set_child("list", list);
     catcher.resolve(screen_width, screen_height);
     app.ui.add_to_ui(key.to_owned(), catcher);
@@ -269,6 +272,8 @@ pub struct DropdownState {
     /// opens.
     rect: Rc<Cell<[f32; 4]>>,
     on_select: OnSelect,
+    /// An option picked from its list, its `on_select` not run yet.
+    picked: Rc<Cell<Option<usize>>>,
 }
 
 impl DropdownState {
@@ -279,19 +284,26 @@ impl DropdownState {
         let UiNodeContent::Container(container) = content else { return };
         let shown = self.options.get(self.selected.get()).map_or("", String::as_str);
         if let Some(label) = container.children.iter_mut().find(|(id, _)| id == "value").and_then(|(_, node)| node.as_label_mut()) {
-            label.set_text(font_system, shown, false);
+            label.set_text_with(font_system, shown);
         }
     }
 
     pub(crate) fn option_count(&self) -> usize {
         self.options.len()
     }
+
+    /// The option picked from its list since this was last asked, and what
+    /// to run for it.
+    pub(crate) fn take_picked(&self) -> Option<(usize, OnSelect)> {
+        self.picked.take().map(|index| (index, Rc::clone(&self.on_select)))
+    }
 }
 
 impl UiNode {
     /// Runs `f` with the picked option's index whenever one is picked from
-    /// this dropdown (see `dropdown`) - no-op on anything else.
-    pub fn on_select(self, f: impl FnMut(&mut App, usize) + 'static) -> Self {
+    /// this dropdown (see `dropdown`) - with what `on_click` gets (the
+    /// layer's node, its scene, the app). No-op on anything else.
+    pub fn on_select(self, f: impl FnMut(&mut Node, &mut SceneAccess, &mut App, usize) + 'static) -> Self {
         if let Some(state) = self.dropdown_state() {
             *state.on_select.borrow_mut() = Some(Box::new(f));
         }

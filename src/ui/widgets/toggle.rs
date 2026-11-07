@@ -2,7 +2,7 @@
 //! (off) or right end (on).
 //!
 //!     toggle(true, &ToggleStyle::default())
-//!         .on_toggle(|app, on| app.renderer.set_vsync(on))
+//!         .on_toggle(|_node, _scene, app, on| app.renderer.set_vsync(on))
 //!
 //! Clicking it flips it; `on_toggle` runs with the new value. From code:
 //! `node.toggle_value()` / `node.set_toggle_value(on)`.
@@ -11,6 +11,8 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use crate::app::App;
+use crate::scene_manager::node::Node;
+use crate::scene_manager::scene_access::SceneAccess;
 use crate::ui::color::UiColor;
 use crate::ui::ui_node::{UiNode, UiNodeContent};
 use crate::ui::ui_transform::{Anchor, SizeValue};
@@ -104,7 +106,7 @@ pub fn toggle(on: bool, style: &ToggleStyle) -> UiNode {
             .on_disabled(|disabled| disabled.set_background_color(UiColor::Rgba(255, 255, 255, 70))))
         // Flips on its own - `on_toggle` replaces this with a flip that also
         // tells the game.
-        .on_click(move |_| flipped.set(!flipped.get()))
+        .on_click_engine(move |_| flipped.set(!flipped.get()))
         .with_toggle(state)
 }
 
@@ -132,13 +134,14 @@ impl ToggleState {
 
 impl UiNode {
     /// Runs `f` with the new value whenever this toggle (see `toggle`) is
-    /// clicked - no-op on anything else.
-    pub fn on_toggle(self, mut f: impl FnMut(&mut App, bool) + 'static) -> Self {
+    /// clicked - with what `on_click` gets (the layer's node, its scene, the
+    /// app). No-op on anything else.
+    pub fn on_toggle(self, mut f: impl FnMut(&mut Node, &mut SceneAccess, &mut App, bool) + 'static) -> Self {
         let Some(on) = self.toggle_cell() else { return self };
-        self.on_click(move |app| {
+        self.on_click(move |node, scene, app| {
             let flipped = !on.get();
             on.set(flipped);
-            f(app, flipped);
+            f(node, scene, app, flipped);
         })
     }
 }

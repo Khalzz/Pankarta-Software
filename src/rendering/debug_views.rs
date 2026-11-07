@@ -3,6 +3,7 @@
 //!     app.renderer.debug.physics = true;   // collider shapes, and what physics behaviors draw
 //!     app.renderer.debug.wireframe = true; // every model's edges
 //!     app.renderer.debug.depth = true;     // the depth buffer, near dark to far light
+//!     app.renderer.debug.shadows = true;   // the sun's shadow maps, nearest first, bottom left
 //!
 //! A view that's off costs nothing.
 
@@ -20,6 +21,7 @@ pub struct DebugViews {
     pub physics: bool,
     pub wireframe: bool,
     pub depth: bool,
+    pub shadows: bool,
 }
 
 /// One mesh's edges, ready to draw - its model's own buffers, read by the

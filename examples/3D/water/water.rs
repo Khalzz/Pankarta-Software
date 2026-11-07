@@ -10,18 +10,15 @@
 
 use nalgebra::{Point3, Vector3};
 use pankarta_software::app::App;
-use pankarta_software::game_nodes::game_object::{Collider, ColliderShape, Physics, RigidBodyData};
-use pankarta_software::input::input;
+use pankarta_software::physics::{Collider, ColliderShape, Physics, RigidBodyData};
 use pankarta_software::input::source::{InputSource, Key};
 use pankarta_software::rendering::frame::FramePlan;
-use pankarta_software::rendering::ui::ui::Ui;
-use pankarta_software::resources::ModelSource;
 use pankarta_software::scene_manager::behavior::Behavior;
-use pankarta_software::scene_manager::node::properties::{rotation_from_degrees, CameraLens, Light, LookAt, Material, Model, Transform3D};
+use pankarta_software::scene_manager::node::properties::{rotation_from_degrees, CameraLens, Light, LookAt, Material, Mesh, Transform3D, UiLayer};
 use pankarta_software::scene_manager::node::Node;
 use pankarta_software::scene_manager::scene::{FrameContext, Scene, SceneBehaviour};
 use pankarta_software::scene_manager::scene_access::SceneAccess;
-use pankarta_software::ui::layer::Layer;
+use pankarta_software::ui::ui_node::UiNode;
 use pankarta_software::ui::ui_transform::SizeValue;
 use pankarta_software::ui::widgets::text;
 use pankarta_software::ui::TextStyle;
@@ -136,7 +133,7 @@ fn crate_node(id: &str, position: Vector3<f32>, tilt: Vector3<f32>) -> Node {
     let volume = 8.0 * half.x * half.y * half.z;
     Node::new(id)
         .with_property(Transform3D { position, rotation: rotation_from_degrees(tilt), ..Default::default() })
-        .with_property(Model::new(ModelSource::Cube).with_scale(half * 2.0))
+        .with_property(Mesh::cube().transform(Transform3D { scale: half * 2.0, ..Default::default() }))
         .with_property(Physics {
             rigidbody: RigidBodyData::dynamic(600.0 * volume),
             colliders: vec![Collider::new(ColliderShape::Cuboid { half_extents: (half.x, half.y, half.z) })],
@@ -149,7 +146,7 @@ fn post_node(id: &str, x: f32, z: f32) -> Node {
     let half = Vector3::new(0.4, 4.5, 0.4);
     Node::new(id)
         .with_property(Transform3D { position: Vector3::new(x, SEABED + half.y, z), ..Default::default() })
-        .with_property(Model::new(ModelSource::Cube).with_scale(half * 2.0))
+        .with_property(Mesh::cube().transform(Transform3D { scale: half * 2.0, ..Default::default() }))
         .with_property(Physics {
             rigidbody: RigidBodyData::fixed(),
             colliders: vec![Collider::new(ColliderShape::Cuboid { half_extents: (half.x, half.y, half.z) })],
@@ -192,14 +189,15 @@ impl SceneBehaviour for WaterScene {
         let waves: Vec<f32> = WAVES.iter().flatten().copied().collect();
         let sea = Node::new("sea")
             .with_property(Transform3D::default())
-            .with_property(Model::new(ModelSource::Plane { subdivisions: 239 }).with_scale(Vector3::new(SEA_SIZE, 1.0, SEA_SIZE)))
-            .with_property(Material::shader("water").param("waves", waves));
+            .with_property(Mesh::plane(239)
+                .transform(Transform3D { scale: Vector3::new(SEA_SIZE, 1.0, SEA_SIZE), ..Default::default() })
+                .material(Material::shader("water").param("waves", waves)));
 
         // The seabed - a body for things to land on, and something for the
         // water to be deep over.
         let seabed = Node::new("seabed")
             .with_property(Transform3D { position: Vector3::new(0.0, SEABED, 0.0), ..Default::default() })
-            .with_property(Model::new(ModelSource::Plane { subdivisions: 0 }).with_scale(Vector3::new(SEA_SIZE, 1.0, SEA_SIZE)))
+            .with_property(Mesh::plane(0).transform(Transform3D { scale: Vector3::new(SEA_SIZE, 1.0, SEA_SIZE), ..Default::default() }))
             .with_property(Physics {
                 rigidbody: RigidBodyData::fixed(),
                 colliders: vec![Collider::new(ColliderShape::HalfSpace { normal: Vector3::y() })],
@@ -228,19 +226,22 @@ impl SceneBehaviour for WaterScene {
         }
 
         // The frame rate, top left.
-        let framerate = text(app, "- fps", &TextStyle::default())
+        let framerate = text("- fps", &TextStyle::default())
             .set_padding((10.0, 10.0))
             .set_size(SizeValue::Pixels(200.0), SizeValue::Fit);
-        Layer::new(app).set_child("framerate", framerate).build(app);
+        let hud = Node::new("hud").with_property(UiLayer::new(UiNode::container().set_child("framerate", framerate)));
+        if let Err(error) = scene.spawn_node(app, hud) {
+            eprintln!("{error}");
+        }
     }
 
     fn update(&mut self, scene: &mut Scene, app: &mut App, _ctx: &mut FrameContext) {
-        if let Some(label) = Ui::get_ui_node(&mut app.ui.renderizable_elements, "framerate").and_then(|node| node.as_label_mut()) {
+        if let Some(label) = scene.get_node_mut("hud").and_then(|node| node.get_property_mut::<UiLayer>()).and_then(|ui| ui.label_mut("framerate")) {
             let fps = app.time.fps().round();
-            label.set_text(&mut app.ui.text.font_system, &format!("{fps} fps"), true);
+            label.set_text(format!("{fps} fps"));
         }
 
-        if input::is_just_pressed(InputSource::key(Key::Space)) {
+        if app.input.is_just_pressed(InputSource::key(Key::Space)) {
             self.drop_crate(scene, app);
         }
     }
@@ -256,6 +257,9 @@ async fn main() {
         }
     };
     app.window.set_title("Water");
+
+    app.window.set_window_mode(pankarta_software::window::WindowMode::Fullscreen);
+
 
     app.renderer.set_vsync(false);
 

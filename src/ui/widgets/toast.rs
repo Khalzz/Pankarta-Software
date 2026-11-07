@@ -251,11 +251,10 @@ pub fn show_toast(app: &mut App, message: &str, style: &ToastStyle) {
     // Sized to the text at its real size - a plain label is measured at the
     // default size first and only ever grows, so smaller text would leave a
     // box too big for it.
-    let font_system = &mut app.ui.text.font_system;
-    let text_width = text_width(font_system, message, style.text.size, style.text.font);
+    let text_width = text_width(message, style.text.size, style.text.font);
     let text_height = min_height_for_font_size(style.text.size);
-    let label = UiNode::label(font_system, message, Some(text_width), Some(text_height))
-        .set_text_style(font_system, &style.text);
+    let label = UiNode::label(message, Some(text_width), Some(text_height))
+        .set_text_style(&style.text);
     // An alert's or error's icon, before the text - a square drawn by its shader.
     let icon = style.kind.icon_shader().map(|shader| {
         UiNode::container()

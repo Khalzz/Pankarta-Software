@@ -1,4 +1,8 @@
+use wgpu::{BindGroupLayout, Device, Queue, SurfaceConfiguration};
+
+use crate::asset_manager::load_asset_binary;
 use crate::rendering::enviroment::skybox_renderer::SkyboxRender;
+use crate::rendering::models::textures::Texture;
 use crate::ui::color::UiColor;
 
 /// The clear color of `Environment::default()`.
@@ -47,8 +51,53 @@ impl Default for Environment {
 }
 
 /// An `Environment` built and ready to draw - its skybox's textures loaded
-/// (see `resources::prepare_environment`).
+/// (see `prepare_environment`).
 pub struct PreparedEnvironment {
     pub skybox: Option<SkyboxRender>,
     pub clear_color: wgpu::Color,
+}
+
+/// Loads a skybox cubemap from 6 face image files inside the assets folder,
+/// in +X, -X, +Y, -Y, +Z, -Z order.
+pub fn load_texture_cube(file_names: [&str; 6], device: &wgpu::Device, queue: &wgpu::Queue) -> anyhow::Result<Texture> {
+    let mut face_bytes: Vec<Vec<u8>> = Vec::with_capacity(6);
+    for file_name in file_names {
+        face_bytes.push(load_asset_binary(file_name)?);
+    }
+    let face_slices: [&[u8]; 6] = std::array::from_fn(|i| face_bytes[i].as_slice());
+    Texture::from_cube_bytes(face_slices, device, queue, "skybox_cube_texture")
+}
+
+/// Builds `environment` so it can be drawn (a skybox's textures loaded) -
+/// no `&mut App`, so it can run on a scene's loading thread (Device/Queue are
+/// cheap, Arc-backed clones). `camera_bind_group_layout` is the one piece
+/// `SkyboxRender::new` needs out of the camera's resources.
+pub fn prepare_environment(device: &Device, queue: &Queue, camera_bind_group_layout: &BindGroupLayout, config: &SurfaceConfiguration, environment: Environment) -> PreparedEnvironment {
+    let srgb = config.format.is_srgb();
+    let default_clear = clear_color(DEFAULT_CLEAR_COLOR, srgb);
+    match environment {
+        Environment::Color(color) => PreparedEnvironment { skybox: None, clear_color: clear_color(color, srgb) },
+        Environment::ProceduralSky { sun } => PreparedEnvironment {
+            skybox: Some(SkyboxRender::new_procedural(device, config, camera_bind_group_layout, sun)),
+            clear_color: default_clear,
+        },
+        Environment::Skybox(faces) => {
+            let texture = load_texture_cube(
+                [&faces.px, &faces.nx, &faces.py, &faces.ny, &faces.pz, &faces.nz],
+                device,
+                queue,
+            );
+
+            match texture {
+                Ok(texture) => PreparedEnvironment {
+                    skybox: Some(SkyboxRender::new(device, config, camera_bind_group_layout, texture)),
+                    clear_color: default_clear,
+                },
+                Err(err) => {
+                    eprintln!("Skybox faces couldn't be loaded, falling back to clear color: {err}");
+                    PreparedEnvironment { skybox: None, clear_color: default_clear }
+                }
+            }
+        }
+    }
 }

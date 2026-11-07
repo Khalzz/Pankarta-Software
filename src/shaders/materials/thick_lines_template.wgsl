@@ -43,8 +43,11 @@ struct VertexOutput {
     @location(0) color: vec4<f32>,
     // How far across the line this is from its middle, and half its width
     // (pixels) - for the soft edge, so fractional widths read as such.
-    @location(1) across_pixels: f32,
+    // Times `w`, undone in fs_main: interpolated with perspective as it is,
+    // that keeps it even on screen when one end is much nearer than the other.
+    @location(1) across_times_w: f32,
     @location(2) half_width: f32,
+    @location(3) w: f32,
 };
 
 // Moves `a` along to `b` until it's in front of the camera (clip w > NEAR) -
@@ -104,7 +107,8 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, line: LineInstance) -> Vert
     let reach = half_width + 1.0;
     let offset_pixels = across * side * reach + direction * along * half_width;
     output.position = vec4<f32>(base.xy + offset_pixels / half_screen * base.w, base.z, base.w);
-    output.across_pixels = side * reach;
+    output.across_times_w = side * reach * base.w;
+    output.w = base.w;
     output.half_width = half_width;
     return output;
 }
@@ -164,6 +168,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
     // How much of this pixel the line covers, across it.
-    let coverage = clamp(input.half_width + 0.5 - abs(input.across_pixels), 0.0, 1.0);
-    return fragment(LineIn(input.position.xy, vec4<f32>(input.color.rgb, input.color.a * coverage), input.across_pixels, input.half_width));
+    let across_pixels = input.across_times_w / input.w;
+    let coverage = clamp(input.half_width + 0.5 - abs(across_pixels), 0.0, 1.0);
+    return fragment(LineIn(input.position.xy, vec4<f32>(input.color.rgb, input.color.a * coverage), across_pixels, input.half_width));
 }

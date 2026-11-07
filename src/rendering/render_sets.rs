@@ -68,6 +68,17 @@ impl RenderSets {
         text.material.key(&format!("text:{name}"))
     }
 
+    /// Moves every set's world-space lines and text by `shift`, for the
+    /// floating origin (see `WorldOrigin`).
+    pub(crate) fn shift_origin(&mut self, device: &wgpu::Device, shift: nalgebra::Vector3<f32>) {
+        for lines in self.lines.values_mut() {
+            lines.shift_origin(device, shift);
+        }
+        for text in self.text.values_mut() {
+            text.shift_origin(shift);
+        }
+    }
+
     /// Drops every set - the scene's ending.
     pub fn clear(&mut self) {
         self.lines.clear();

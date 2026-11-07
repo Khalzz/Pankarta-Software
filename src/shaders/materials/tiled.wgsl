@@ -9,13 +9,19 @@ struct Params {
     tile_size: f32,
     // 1: measured in the world - 0: on the object.
     world: f32,
+    // Set by the engine, in the world: where the scene's (0, 0, 0) is in the
+    // world, modulo tile_size (see WorldOrigin) - so the texture stays put
+    // in the world when the floating origin moves, however far out it is.
+    origin_offset: vec3<f32>,
+    // Multiplies the texture - see `Material::color`. White by default.
+    color: vec4<f32>,
 }
 
 fn fragment(f: FragmentIn) -> vec4<f32> {
     let in_world = params.world > 0.5;
     // On the object, from its lowest corner - so a face shows the texture
     // from its edge, a whole copy every `tile_size`.
-    let position = select(f.local_position - f.local_bounds_min, f.world_position, in_world);
+    let position = select(f.local_position - f.local_bounds_min, f.world_position + params.origin_offset, in_world);
     let normal = select(f.local_normal, f.normal, in_world);
     let facing = abs(normal);
 
@@ -50,5 +56,5 @@ fn fragment(f: FragmentIn) -> vec4<f32> {
     }
     let scale = 1.0 / max(params.tile_size, 0.0001);
     let color = textureSampleGrad(t_diffuse, s_diffuse, uv * scale, uv_x * scale, uv_y * scale);
-    return vec4<f32>(f.lighting * color.rgb, color.a);
+    return vec4<f32>(f.lighting * color.rgb * params.color.rgb, color.a * params.color.a);
 }

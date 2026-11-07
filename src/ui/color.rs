@@ -89,11 +89,8 @@ impl From<UiColor> for GlyphonColor {
     }
 }
 
-/// Bridges RON-authored colors (see `ui_structure.rs`), hand-written as
-/// `[f32; 4]` in the 0.0..=1.0 range - not part of the "how do I specify a color in
-/// code" surface itself (use `UiColor::Rgb`/`Rgba`/`Hex` for that), just enough of
-/// a bridge so `UiNode::from_component` can hand RON data straight to `Style`
-/// without a separate code path.
+/// A color as `[f32; 4]` in the 0.0..=1.0 range - not the usual way to give
+/// one in code (use `UiColor::Rgb`/`Rgba`/`Hex` for that).
 impl From<[f32; 4]> for UiColor {
     fn from([r, g, b, a]: [f32; 4]) -> Self {
         UiColor::Rgba((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8, (a * 255.0) as u8)

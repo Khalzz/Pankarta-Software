@@ -15,6 +15,8 @@ pub enum WindowMode {
     /// Takes the screen over and changes its resolution to the window's size
     /// (the closest one the screen supports). Switching is slower and can
     /// make the screen go black for a moment.
+    /// On macOS this is `BorderlessFullscreen` instead - exclusive fullscreen
+    /// there stops Cmd+Tab from leaving the game.
     Fullscreen,
 }
 
@@ -51,6 +53,12 @@ impl Window {
     }
 
     pub fn set_window_mode(&mut self, mode: WindowMode) -> Result<(), String> {
+        // macOS: SDL's exclusive fullscreen puts the window above everything
+        // (and captures the screen when it changes resolution), so Cmd+Tab
+        // and Mission Control can't get out of the game. Borderless covers
+        // the screen just the same and lets the system switch apps.
+        #[cfg(target_os = "macos")]
+        let mode = if mode == WindowMode::Fullscreen { WindowMode::BorderlessFullscreen } else { mode };
         match mode {
             WindowMode::Windowed => {
                 self.window.set_fullscreen(FullscreenType::Off)?;

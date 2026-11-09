@@ -522,6 +522,7 @@ fn traverse_node(node: gltf::Node<'_>, buffer_data: &[Vec<u8>], device: &wgpu::D
                 // key matches just one.
                 double_sided: double_sided.covers(&node_name) || double_sided.covers(&key),
                 local_bounds: (lo, hi),
+                visible: true,
             };
 
             let list = if primitive.material().alpha_mode() == gltf::material::AlphaMode::Blend || primitive.material().alpha_mode() == gltf::material::AlphaMode::Mask {

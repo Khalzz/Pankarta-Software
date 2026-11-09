@@ -48,7 +48,7 @@ pub mod prelude {
     pub use crate::scene_manager::behavior::Behavior;
     pub use crate::scene_manager::node::{Node, NodeLookup, NodeLookupMut};
     pub use crate::scene_manager::node::properties::{
-        degrees_from_rotation, rotation_from_degrees, CameraLens, Light, LightKind, Line, LinePoint, LineSpace, LookAt, Material, Mesh, MeshShape, Model, OriginAnchor, Shape2D, ShapeKind, Text, TextureSpace, Transform2D, Transform3D, UiLayer,
+        degrees_from_rotation, rotation_from_degrees, CameraLens, Light, LightKind, Line, LinePoint, LineSpace, LookAt, Material, Mesh, MeshShape, Model, ModelMesh, OriginAnchor, Shape2D, ShapeKind, Text, TextureSpace, Transform2D, Transform3D, UiLayer,
     };
     pub use crate::rendering::enviroment::environment::Environment;
     pub use crate::rendering::render_pipeline::shadow_renderer::Shadows;

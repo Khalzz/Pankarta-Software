@@ -85,6 +85,17 @@ pub struct Mesh {
     /// leaves the origin at the model's, with the geometry baked off to the
     /// side - see `local_center`).
     pub local_bounds: ([f32; 3], [f32; 3]),
+    /// `false` leaves it out of every pass - its shadow too. Set from a
+    /// node's `ModelMesh::visible` on the node's own copy (see
+    /// `properties::Model::mesh_mut`).
+    pub visible: bool,
+}
+
+/// The object a mesh key belongs to: the key without the `#primN` an object
+/// with several materials loads its later ones with (see
+/// `Model::meshes_named_mut`).
+pub(crate) fn object_name(key: &str) -> &str {
+    key.split("#prim").next().unwrap_or(key)
 }
 
 /// # Model
@@ -198,7 +209,7 @@ impl Mesh {
             layout,
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: transform_buffer.as_entire_binding() }],
         });
-        let mesh = Mesh {
+        Mesh {
             name: self.name.clone(),
             first_index: self.first_index,
             num_elements: self.num_elements,
@@ -212,9 +223,8 @@ impl Mesh {
             alpha_mode: self.alpha_mode,
             double_sided: self.double_sided,
             local_bounds: self.local_bounds,
-        };
-        mesh.update_transform(queue);
-        mesh
+            visible: self.visible,
+        }
     }
 
     /// The middle of the geometry, in the mesh's local space.
@@ -256,18 +266,12 @@ impl Mesh {
         base.rotation * base.scale.component_mul(&self.local_center())
     }
 
+    /// Writes `transform` - where it sits in its model - to the GPU, the same
+    /// way loading it did (see `MeshUniform::new`): a mesh nobody moved is
+    /// drawn exactly as loaded. (`transform` already has a nested mesh's
+    /// parent in - see asset_manager::gltf::traverse_node.)
     pub fn update_transform(&self, queue: &wgpu::Queue) {
-        let transform_data = match &self.parent_transform {
-            Some(parent_transform) => Transform3D {
-                position: parent_transform.position + parent_transform.rotation * (self.transform.position - parent_transform.position),
-                rotation: parent_transform.rotation * self.transform.rotation,
-                scale: parent_transform.scale,
-            },
-            None => self.transform,
-        };
-        let matrix: [[f32; 4]; 4] = transform_data.matrix().into();
-
-        queue.write_buffer(&self.transform_buffer, 0, bytemuck::cast_slice(&[matrix]));
+        queue.write_buffer(&self.transform_buffer, 0, bytemuck::cast_slice(&[MeshUniform::new(&self.transform, self.local_bounds)]));
     }
 
     pub fn change_transform(&mut self, queue: &wgpu::Queue, transform: Transform3D) {

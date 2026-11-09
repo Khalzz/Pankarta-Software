@@ -22,7 +22,7 @@ pub use line::{Line, LinePoint, LineSpace};
 pub use look_at::LookAt;
 pub use material::{Material, TextureSpace};
 pub use mesh::{Mesh, MeshShape};
-pub use model::Model;
+pub use model::{Model, ModelMesh};
 pub use origin_anchor::OriginAnchor;
 pub use parent::{Parent, Space};
 pub use shape_2d::{Shape2D, ShapeKind};

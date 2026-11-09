@@ -118,7 +118,7 @@ impl WireframeRenderer {
         render_pass.set_bind_group(1, camera, &[]);
         for (key, model) in drawn {
             render_pass.set_vertex_buffer(0, model.instance_buffer.slice(..));
-            for (mesh_key, mesh) in model.model.mesh_lists.values().flatten() {
+            for (mesh_key, mesh) in model.model.mesh_lists.values().flatten().filter(|(_, mesh)| mesh.visible) {
                 let Some(edges) = self.meshes.get(&(key.clone(), model.stamp, mesh_key.clone())) else { continue };
                 render_pass.set_bind_group(0, &edges.bind_group, &[]);
                 render_pass.set_bind_group(2, &mesh.transform_bind_group, &[]);

@@ -1029,6 +1029,7 @@ impl App {
                 let mut hasher = DefaultHasher::new();
                 model_ref.hash(&mut hasher);
                 for mesh in model.model.mesh_lists.values().flat_map(|meshes| meshes.values()) {
+                    mesh.visible.hash(&mut hasher);
                     for transform in std::iter::once(&mesh.transform).chain(mesh.parent_transform.as_ref()) {
                         hash_floats(transform.position.as_slice(), &mut hasher);
                         hash_floats(transform.rotation.coords.as_slice(), &mut hasher);

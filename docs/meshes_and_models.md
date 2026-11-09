@@ -100,6 +100,22 @@ The engine notices on the next frame and puts parts on the renderer or takes the
 
 Other calls: `get_part(name)`, `parts()` (the parts you added, in order), `file_path()`.
 
+### The file's own meshes
+
+A file model's meshes (by their name in the glTF) can be moved, turned, scaled and hidden **per node**:
+
+```rust
+let model = node.get_property_mut::<Model>().unwrap();
+model.mesh_mut("left_aleron").unwrap().rotate_from_original(UnitQuaternion::from_axis_angle(&Vector3::x_axis(), 0.3));
+model.mesh_mut("Afterburner").unwrap().visible = false;
+for mesh in model.meshes() { println!("{}", mesh.name()); }
+```
+
+- `mesh_mut(name)` / `mesh(name)` / `meshes_mut()` / `meshes()` return `ModelMesh`es: `transform` (where it sits in the model, starting where the file put it) and `visible` are public; `name()`, `original_transform()`, `local_bounds()`, `rotate_from_original(rotation)` and `reset()` help.
+- They're empty until the file is loaded: from when the node is spawned (for nodes spawned in `on_spawn`, once the scene has loaded - so use them from a behaviour's `update`).
+- A node shares the one loaded copy of its file with every other node using it until one of its meshes changes. From then on it's drawn with its own light copy (see `Model::share`: its own mesh transforms, the same geometry and textures), so nothing else moves with it. That node no longer shares an instance buffer with the others.
+- An object with several materials is one `ModelMesh` (all its `#primN` pieces move together).
+
 ### File-only settings (unchanged)
 
 `.double_sided(DoubleSidedMeshes::..)` and `.variant(name)` work as before, on the file's meshes.
@@ -128,7 +144,7 @@ The hex color is converted to linear, so it matches what the same hex looks like
 - **A `Material` put directly on a node isn't used any more.** Give it to the `Mesh` or `Model` with `.material(..)`. The engine prints a warning when a node still has one.
 - **One node can be several drawn instances.** A file model is drawn under the node's id. Each added part is drawn under `"node#part"`. This is internal, but it shows up in shader material keys.
 - **Physics colliders read from a model file** (`TrimeshFromModel`) are scaled by the node's scale times the model's `transform.scale`, just as they were scaled by `.scaled(..)` before.
-- **Not done yet:** a `Mesh` that is one single mesh taken out of a file (e.g. only the F-16's wing). For now, use the whole file as a `Model` and change its meshes' materials with `part_material`. Moving or hiding the file's own meshes per node isn't supported either, because their transforms belong to the shared loaded copy. Use `.variant(..)` for that, as before.
+- **Not done yet:** a `Mesh` that is one single mesh taken out of a file (e.g. only the F-16's wing). For now, use the whole file as a `Model` and change its meshes' materials with `part_material`, and move or hide them with `mesh_mut` (see "The file's own meshes").
 
 ---
 

@@ -238,6 +238,7 @@ pub(crate) fn build_mesh_model(name: &str, vertices: &[ModelVertex], indices: &[
         alpha_mode: gltf::material::AlphaMode::Opaque,
         double_sided,
         local_bounds,
+        visible: true,
     };
     let mut opaque = HashMap::new();
     opaque.insert(name.to_owned(), mesh);

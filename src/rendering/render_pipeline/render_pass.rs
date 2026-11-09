@@ -429,6 +429,9 @@ impl App {
                 for list in ["opaque", "transparent"] {
                     let Some(meshes) = model_data.model.mesh_lists.get(list) else { continue };
                     for (mesh_key, mesh) in meshes {
+                        if !mesh.visible {
+                            continue;
+                        }
                         let key = model_data.mesh_materials.get(mesh_base_name(mesh_key)).map_or(material, String::as_str);
                         let Some(placement) = self.renderer.material_placements.get(key) else { continue };
                         let Some((single, double, shell)) = self.mesh_pipelines(key, placement, pass, list) else { continue };
@@ -556,8 +559,9 @@ impl App {
                     let Some(meshes) = model_data.model.mesh_lists.get(list) else { continue };
                     for (mesh_key, mesh) in meshes {
                         let cutout = mesh.alpha_mode == AlphaMode::Mask;
-                        // See-through (blended) meshes don't cast.
-                        if list == "transparent" && !cutout {
+                        // See-through (blended) meshes don't cast - nor
+                        // hidden ones.
+                        if !mesh.visible || (list == "transparent" && !cutout) {
                             continue;
                         }
                         let key = model_data.mesh_materials.get(mesh_base_name(mesh_key)).map_or(run.material.as_str(), String::as_str);
@@ -614,7 +618,7 @@ impl App {
                 }
                 for list in ["opaque", "transparent"] {
                     let Some(meshes) = model_data.model.mesh_lists.get(list) else { continue };
-                    for mesh_key in meshes.keys() {
+                    for (mesh_key, _) in meshes.iter().filter(|(_, mesh)| mesh.visible) {
                         let key = model_data.mesh_materials.get(mesh_base_name(mesh_key)).map_or(material, String::as_str);
                         let Some(placement) = self.renderer.material_placements.get(key) else { continue };
                         if self.mesh_pipelines(key, placement, pass, list).is_some() {

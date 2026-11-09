@@ -9,6 +9,7 @@ use nalgebra::Vector3;
 use crate::app::App;
 use crate::asset_manager::models::{self, DoubleSidedMeshes, ModelSource};
 use crate::rendering::instance_management::{create_instance_buffer, InstanceData, ModelDataInstance};
+use crate::rendering::models::model::object_name as loaded_object_name;
 use crate::rendering::shader_library::STANDARD;
 
 use super::node::properties::{Material, Mesh, Model, Transform3D};
@@ -21,7 +22,7 @@ pub(crate) struct Draw<'a> {
     pub(crate) id: String,
     pub(crate) source: ModelSource,
     pub(crate) double_sided: Cow<'a, DoubleSidedMeshes>,
-    pub(crate) variant: Option<&'a str>,
+    pub(crate) variant: Option<Cow<'a, str>>,
     /// Where it sits relative to its node.
     pub(crate) local: Transform3D,
     pub(crate) material: Option<Cow<'a, Material>>,
@@ -32,7 +33,7 @@ pub(crate) struct Draw<'a> {
 impl Draw<'_> {
     /// What its loaded copy is kept under.
     pub(crate) fn model_ref(&self) -> String {
-        models::variant_key(&self.source.key(), self.variant)
+        models::variant_key(&self.source.key(), self.variant.as_deref())
     }
 
     pub(crate) fn material_key(&self) -> String {
@@ -61,7 +62,7 @@ pub(crate) fn draws(node: &Node) -> Vec<Draw<'_>> {
 /// Everything `model` draws, on a node `id`.
 pub(crate) fn model_draws<'a>(id: &str, model: &'a Model) -> Vec<Draw<'a>> {
     let mut draws = Vec::new();
-    if let Some((source, double_sided, variant, material)) = model.file_draw() {
+    if let Some((source, double_sided, variant, material)) = model.file_draw(id) {
         draws.push(Draw {
             id: id.to_owned(),
             source,
@@ -154,13 +155,54 @@ pub fn register_static_model(scene: &mut Scene, app: &mut App, id: &str) -> Resu
             errors.push(error);
         }
     }
+    // Its file's meshes, there to change from now on (see Model::mesh_mut).
+    if let Some(node) = scene.content.nodes.get_mut(id) {
+        read_file_meshes(node, app);
+    }
     if errors.is_empty() { Ok(()) } else { Err(errors.join("; ")) }
+}
+
+/// The file's meshes of `node`'s model, read from its loaded copy - once
+/// it's loaded, if they haven't been yet.
+fn read_file_meshes(node: &mut Node, app: &App) {
+    let Some(model) = node.get_property_mut::<Model>().filter(|model| model.needs_meshes()) else { return };
+    let Some(key) = model.file_key() else { return };
+    let cache = &app.assets.models;
+    if let Some(loaded) = cache.drawn.get(&key).map(|instanced| &instanced.model).or_else(|| cache.idle.get(&key)) {
+        model.read_meshes(loaded);
+    }
+}
+
+/// Every model whose file meshes a behaviour changed (see Model::mesh_mut):
+/// those meshes onto the node's own copy of the file - where they sit, and
+/// whether they're drawn.
+fn apply_file_meshes(scene: &Scene, app: &mut App) {
+    let queue = &app.renderer.queue;
+    let drawn = &mut app.assets.models.drawn;
+    for node in scene.content.nodes.iter() {
+        let Some(model) = node.get_property::<Model>() else { continue };
+        let Some(key) = model.own_copy_key(&node.id) else { continue };
+        let Some(copy) = drawn.get_mut(&key) else { continue };
+        for (mesh_key, mesh) in copy.model.mesh_lists.values_mut().flat_map(|meshes| meshes.iter_mut()) {
+            let Some(own) = model.mesh(loaded_object_name(mesh_key)) else { continue };
+            mesh.change_transform(queue, own.transform);
+            mesh.visible = own.visible;
+        }
+    }
 }
 
 /// Every frame: each drawn instance onto its node's current transform,
 /// material and shadows - and a part added, removed, hidden or shown since
-/// the last frame put on or taken off the renderer.
+/// the last frame put on or taken off the renderer. A model whose file
+/// meshes were changed moves onto a copy of the file of its own, and gets
+/// them put on it.
 pub(crate) fn sync_instances(scene: &mut Scene, app: &mut App) {
+    for node in scene.content.nodes.iter_mut() {
+        read_file_meshes(node, app);
+        if let Some(model) = node.get_property_mut::<Model>() {
+            model.check_own_copy();
+        }
+    }
     let mut added = Vec::new();
     let mut gone = Vec::new();
     {
@@ -205,6 +247,7 @@ pub(crate) fn sync_instances(scene: &mut Scene, app: &mut App) {
             eprintln!("{error}");
         }
     }
+    apply_file_meshes(scene, app);
 }
 
 /// An instance to put on the renderer, with what loading its model takes.
@@ -229,7 +272,7 @@ impl Pending {
                 casts_shadows: draw.casts_shadows,
                 receives_shadows: draw.receives_shadows,
             },
-            variant: draw.variant.map(str::to_owned),
+            variant: draw.variant.as_deref().map(str::to_owned),
             load: app.assets.model_load(&draw.source, &draw.double_sided),
         }
     }

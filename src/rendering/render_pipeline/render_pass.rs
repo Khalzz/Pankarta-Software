@@ -416,7 +416,11 @@ impl App {
         // across pipeline changes, rebinding them itself where a pipeline's
         // layout needs it.)
         render_pass.set_bind_group(1, &self.renderer.camera_resources.bind_group, &[]);
-        render_pass.set_bind_group(3, &self.renderer.light.rendering_data.bind_group, &[]);
+        // See-through meshes unshadowed, unless shadows fall on them
+        // (Shadows::on_transparent).
+        let light = &self.renderer.light.rendering_data;
+        let light_group = if pass == "transparent" && !self.renderer.shadows().on_transparent { &light.no_shadows_bind_group } else { &light.bind_group };
+        render_pass.set_bind_group(3, light_group, &[]);
         // What's bound now - set again only when a mesh needs another.
         let mut bound_pipeline: Option<&wgpu::RenderPipeline> = None;
         let mut bound_group0: Option<&wgpu::BindGroup> = None;

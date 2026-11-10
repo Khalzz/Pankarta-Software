@@ -9,10 +9,10 @@ use crate::rendering::{camera::handler::CameraResources, models::{model::{self, 
 // aligns to 16, but a scalar right after one packs in immediately rather
 // than waiting for the next 16-byte boundary (that's std140's rule, not
 // WGSL's) - position(0..12)+_padding(12..16), color(16..28), time(28..32),
-// camera_position(32..44)+_padding2(44..48), ambient(48..60)+_padding3(60..64).
+// camera_position(32..44)+_padding2(44..48), ambient(48..60)+ambient_ground(60..64).
 // camera_position starts exactly on a 16-byte boundary (32) so it needs no
 // extra padding before it either; _padding2 keeps ambient on the next one,
-// and _padding3 brings shadow_view_proj to 64, the next 16-byte boundary a
+// and ambient_ground (a scalar, packed right after it) brings shadow_view_proj to 64, the next 16-byte boundary a
 // mat4x4 aligns to - shadow_view_proj(64..320, 4 of them),
 // shadow_params(320..336), shadow_texels(336..352), 352 a multiple of 16 as
 // the struct's size has to be.
@@ -45,7 +45,10 @@ pub struct LightUniform {
     pub _padding2: u32,
     // The light from the whole sky - see `Renderer::set_ambient_light`.
     pub ambient: [f32; 3],
-    pub _padding3: u32,
+    // How much of `ambient` reaches a surface facing straight down (1: as
+    // much as one facing up) - see `Renderer::set_ambient_ground`. Shaders
+    // that don't declare it read it as padding.
+    pub ambient_ground: f32,
     // Each cascade's view-projection - where a camera-relative position
     // falls in its shadow map (see render_pipeline::shadow_renderer).
     pub shadow_view_proj: [[[f32; 4]; 4]; MAX_CASCADES],
@@ -64,6 +67,13 @@ pub struct LightRenderData {
     /// pass binds, drawing into the real ones (see App::render_shadow_pass).
     pub unshadowed_bind_group: BindGroup,
     pub buffer: Buffer,
+    /// The same light as `buffer`, but saying there are no shadow maps
+    /// (`shadow_params.x` 0) - so what's drawn with it is never shadowed.
+    /// Written next to `buffer` every frame (see App::render).
+    pub no_shadows_buffer: Buffer,
+    /// Binds `no_shadows_buffer` - the "transparent" pass draws with it when
+    /// shadows don't fall on see-through meshes (`Shadows::on_transparent`).
+    pub no_shadows_bind_group: BindGroup,
     pub render_pipeline: RenderPipeline
 }
 
@@ -90,7 +100,7 @@ impl Light {
             camera_position: [0.0, 0.0, 0.0],
             _padding2: 0,
             ambient: [0.0, 0.0, 0.0],
-            _padding3: 0,
+            ambient_ground: 1.0,
             shadow_view_proj: [[[0.0; 4]; 4]; MAX_CASCADES],
             shadow_params: [0.0; 4],
             shadow_texels: [0.0; MAX_CASCADES],
@@ -110,6 +120,15 @@ impl Light {
         // drawing into - a stand-in, never read, in their place.
         let stand_in = Self::stand_in_shadow_map(device);
         let unshadowed_bind_group = Self::create_bind_group(device, &bind_group_layout, &buffer, &stand_in);
+        // With no maps to read (its count is 0), the stand-in is never read.
+        let no_shadows_buffer = device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("Light (no shadows) VB"),
+                contents: bytemuck::cast_slice(&[uniform]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            }
+        );
+        let no_shadows_bind_group = Self::create_bind_group(device, &bind_group_layout, &no_shadows_buffer, &stand_in);
 
         let render_pipeline = {
             let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -140,6 +159,8 @@ impl Light {
             bind_group,
             unshadowed_bind_group,
             buffer,
+            no_shadows_buffer,
+            no_shadows_bind_group,
             render_pipeline,
         };
 

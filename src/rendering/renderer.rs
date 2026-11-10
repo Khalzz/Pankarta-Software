@@ -96,6 +96,8 @@ pub struct Renderer {
   environment: Environment,
   /// See `set_ambient_light`.
   ambient_light: [f32; 3],
+  /// See `set_ambient_ground`.
+  ambient_ground: f32,
   /// `environment` built and ready to draw - or, for a moment after it
   /// changed, the one before it - and the `Environment` it was built from.
   pub(crate) prepared_environment: PreparedEnvironment,
@@ -278,6 +280,7 @@ impl Renderer {
       line_renderer,
       wireframe,
       ambient_light: [0.25, 0.25, 0.3],
+      ambient_ground: 0.45,
       prepared_from: environment.clone(),
       environment,
       prepared_environment,
@@ -402,6 +405,22 @@ impl Renderer {
   /// a soft blue-grey (0.25, 0.25, 0.3) by default.
   pub fn set_ambient_light(&mut self, color: [f32; 3]) {
     self.ambient_light = color;
+  }
+
+  /// How much of the ambient light reaches a surface facing straight down -
+  /// see `set_ambient_ground`.
+  pub fn ambient_ground(&self) -> f32 {
+    self.ambient_ground
+  }
+
+  /// How much of the ambient light (`set_ambient_light`) reaches a surface
+  /// facing straight down, 0 to 1 - one facing up gets all of it, and
+  /// between them it blends with the way the surface faces. The sky is
+  /// brighter than the ground, so undersides, floors under overhangs and
+  /// downward faces in a cockpit read darker than tops. 1 is the old flat
+  /// ambient (the same whichever way a surface faces); 0.45 by default.
+  pub fn set_ambient_ground(&mut self, ground: f32) {
+    self.ambient_ground = ground.clamp(0.0, 1.0);
   }
 
   /// How shadows look, and whether there are any - see `set_shadows`.

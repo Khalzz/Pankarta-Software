@@ -12,7 +12,21 @@ use pankarta_software::ui::TextStyle;
 use crate::player::Player;
 use crate::sign::sign_glass;
 
-pub struct WalkingScene;
+pub struct WalkingScene {
+    /// Which of AMBIENT_GROUND_LEVELS is in use - H cycles them.
+    ambient_ground: usize,
+}
+
+/// How much of the ambient light reaches a surface facing down (see
+/// Renderer::set_ambient_ground) - H steps through these to compare: 1 is
+/// flat (every way the same), lower darkens undersides and downward faces.
+const AMBIENT_GROUND_LEVELS: [(f32, &str); 4] = [(1.0, "flat"), (0.7, "light"), (0.45, "default"), (0.25, "strong")];
+const DEFAULT_AMBIENT_GROUND: usize = 2;
+
+fn ambient_ground_text(level: usize) -> String {
+    let (value, name) = AMBIENT_GROUND_LEVELS[level];
+    format!("H: ambient from below ({name}, {value})")
+}
 
 const GROUND_TEXTURE: &str = "textures/grid/Dark/texture_01.png";
 const CUBE_TEXTURES: [&str; 4] = [
@@ -127,7 +141,11 @@ impl WalkingScene {
             .set_padding((10.0, 10.0))
             .set_size(SizeValue::Pixels(200.0), SizeValue::Fit);
         let hud = Node::new("hud").with_property(UiLayer::new(
-            UiNode::container().set_child("framerate", framerate),
+            UiNode::container()
+                .set_child("framerate", framerate)
+                .set_child("ambient_ground", text(&ambient_ground_text(DEFAULT_AMBIENT_GROUND), &TextStyle::default())
+                    .set_padding((10.0, 4.0))
+                    .set_size(SizeValue::Pixels(500.0), SizeValue::Fit)),
         ));
         if let Err(error) = scene.spawn_node(app, hud) {
             eprintln!("{error}");
@@ -145,19 +163,28 @@ impl WalkingScene {
             .text(PLANE_NAME);
 
         app.window.set_cursor_locked(true);
-        Self
+        app.renderer.set_ambient_ground(AMBIENT_GROUND_LEVELS[DEFAULT_AMBIENT_GROUND].0);
+        Self { ambient_ground: DEFAULT_AMBIENT_GROUND }
     }
 }
 
 impl SceneBehaviour for WalkingScene {
     fn update(&mut self, scene: &mut Scene, app: &mut App, _ctx: &mut FrameContext) {
-        if let Some(label) = scene
+        if app.input.is_just_pressed(InputSource::key(Key::H)) {
+            self.ambient_ground = (self.ambient_ground + 1) % AMBIENT_GROUND_LEVELS.len();
+            app.renderer.set_ambient_ground(AMBIENT_GROUND_LEVELS[self.ambient_ground].0);
+        }
+        if let Some(ui) = scene
             .get_node_mut("hud")
             .and_then(|node| node.get_property_mut::<UiLayer>())
-            .and_then(|ui| ui.label_mut("framerate"))
         {
-            let fps = app.time.fps().round();
-            label.set_text(format!("{fps} fps"));
+            if let Some(label) = ui.label_mut("framerate") {
+                let fps = app.time.fps().round();
+                label.set_text(format!("{fps} fps"));
+            }
+            if let Some(label) = ui.label_mut("ambient_ground") {
+                label.set_text(ambient_ground_text(self.ambient_ground));
+            }
         }
 
         let transform_of = |id: &str| {

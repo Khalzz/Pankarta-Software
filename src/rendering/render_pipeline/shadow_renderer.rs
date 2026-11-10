@@ -50,11 +50,23 @@ pub struct Shadows {
     pub resolution: u32,
     /// How soft their edges are, in texels of the map - 0 for hard.
     pub softness: f32,
+    /// The least a shadow's edge fades over, in meters, however fine the
+    /// maps' texels - so close-up shadows (sharp maps) blend in smoothly
+    /// instead of ending in a hard line. The wider of this and `softness`
+    /// texels wins. 0: `softness` alone.
+    pub blur: f32,
+    /// Whether shadows fall on see-through meshes (glTF alpha mode Blend -
+    /// glass, flames), drawn in the "transparent" pass. They never cast any;
+    /// off, they don't get darkened by others' either.
+    pub on_transparent: bool,
 }
 
 impl Default for Shadows {
     fn default() -> Self {
-        Self { enabled: true, distance: 150.0, cascades: 3, resolution: 2048, softness: 1.0 }
+        // 4 maps over 40 m: the nearest ~1.5 m each way around the camera at
+        // ~2 mm a texel, edges fading over at least 1.5 cm - sharp up close,
+        // smooth edges; nothing past 40 m from the camera casts.
+        Self { enabled: true, distance: 40.0, cascades: 4, resolution: 2048, softness: 1.0, blur: 0.015, on_transparent: true }
     }
 }
 
@@ -173,13 +185,19 @@ pub struct ShadowRender {
     pub(crate) poses: HashMap<String, [f32; 10]>,
 }
 
+/// The most the slope bias pushes a face back - see create_shadow_pipeline.
+const SHADOW_BIAS_CLAMP: f32 = 0.00005;
+
 /// A shadow pass pipeline: drawn with `layout` (the model pipelines'), from
 /// `module`'s `vs_main`, and `fragment` if any (none: depth only). Both
 /// sides of every face: a double-sided mesh casts like it's drawn, and a
 /// single-sided one seen from behind by the sun (a plane's underside) still
 /// casts. The slope bias pushes faces the sun sees edge-on back a little, so
-/// they don't shadow themselves in stripes (the shader's normal offset does
-/// the rest).
+/// they don't shadow themselves in stripes (the shader's own offsets do the
+/// rest) - but never more than SHADOW_BIAS_CLAMP: unclamped, a face the sun
+/// sees nearly edge-on (a box's side under a high sun) goes back so far it
+/// stops casting, and light leaks in a bright band around the shadows of
+/// what's close to the surface it falls on.
 pub(crate) fn create_shadow_pipeline(device: &wgpu::Device, label: &str, layout: &wgpu::PipelineLayout, module: &wgpu::ShaderModule, fragment: Option<&str>) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(label),
@@ -192,7 +210,10 @@ pub(crate) fn create_shadow_pipeline(device: &wgpu::Device, label: &str, layout:
             depth_write_enabled: true,
             depth_compare: wgpu::CompareFunction::Less,
             stencil: wgpu::StencilState::default(),
-            bias: wgpu::DepthBiasState { constant: 1, slope_scale: 1.5, clamp: 0.0 },
+            // The clamp is in depth (0..1 across the map's box, which runs
+            // CASTER_REACH plus the box's own size along the sun - 200 to
+            // ~600 m): about 1 to 3 cm.
+            bias: wgpu::DepthBiasState { constant: 1, slope_scale: 2.0, clamp: SHADOW_BIAS_CLAMP },
         }),
         multisample: wgpu::MultisampleState::default(),
         multiview: None,

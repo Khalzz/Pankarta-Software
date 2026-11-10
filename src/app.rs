@@ -238,14 +238,22 @@ impl App {
             let resolution = self.renderer.shadows.resolution() as f32;
             self.renderer.light.uniform.shadow_view_proj = fit.view_proj;
             self.renderer.light.uniform.shadow_texels = fit.texel;
-            self.renderer.light.uniform.shadow_params = [cascades, 1.0 / resolution, settings.softness, 0.0];
+            self.renderer.light.uniform.shadow_params = [cascades, 1.0 / resolution, settings.softness, settings.blur.max(0.0)];
         } else {
             self.renderer.light.uniform.shadow_params[0] = 0.0;
         }
         self.renderer.light.uniform.ambient = self.renderer.ambient_light();
+        self.renderer.light.uniform.ambient_ground = self.renderer.ambient_ground();
         self.renderer.light.uniform.time = self.time.shader_time();
         self.renderer.light.uniform.camera_position = camera_position.into();
         self.renderer.queue.write_buffer(&self.renderer.light.rendering_data.buffer, 0, bytemuck::cast_slice(&[self.renderer.light.uniform]));
+        // The same light, unshadowed - for see-through meshes when shadows
+        // don't fall on them (Shadows::on_transparent).
+        if !self.renderer.shadows().on_transparent {
+            let mut unshadowed = self.renderer.light.uniform;
+            unshadowed.shadow_params[0] = 0.0;
+            self.renderer.queue.write_buffer(&self.renderer.light.rendering_data.no_shadows_buffer, 0, bytemuck::cast_slice(&[unshadowed]));
+        }
         let queue = self.renderer.queue.clone();
         if let Some(skybox) = self.renderer.prepared_environment.skybox.as_mut() {
             skybox.set_sun(&queue, sun.map(|(toward, _, _)| toward));

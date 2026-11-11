@@ -71,7 +71,7 @@ fn fragment(f: FragmentIn) -> vec4<f32> {
     let thickness = max(behind - linear_depth(ndc.z), 0.0);
     let deepness = 1.0 - exp(-thickness * 0.35);
 
-    let to_camera = normalize(-f.position);
+    let to_camera = -view_direction(f.position);
     let diffuse = max(dot(normal, engine.sun_direction), 0.0);
     var color = mix(params.shallow.rgb, params.deep.rgb, deepness) * (engine.ambient_color + (0.55 + 0.45 * diffuse) * engine.sun_color);
     // More sky reflected the flatter it's looked at.

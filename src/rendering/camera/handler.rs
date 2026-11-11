@@ -4,7 +4,7 @@ use sdl2::rect::Point;
 use wgpu::{util::DeviceExt, BindGroup, BindGroupLayout, BindGroupLayoutDescriptor, Buffer, Device, Queue};
 use crate::rendering::instance_management::InstanceData;
 use crate::utils::lerps::{lerp, lerp_point3, smoothstep};
-use crate::scene_manager::node::properties::Transform3D;
+use crate::scene_manager::node::properties::{CameraLens, Transform3D};
 
 use super::camera::Camera;
 use super::projection::Projection;
@@ -29,6 +29,9 @@ pub const DEFAULT_CAMERA: &str = "default_camera";
 // camera's own stored settings, so nothing reading those directly ever sees
 // a mid-blend value.
 const TRANSITION_CAMERA_NAME: &str = "__camera_transition";
+/// A camera's far plane unless its lens says otherwise (meters) - kept in
+/// sync with CameraResources::new's.
+const DEFAULT_FAR: f32 = 4_000_000.0;
 
 // State for an in-progress transition_to(...) - see its doc comment.
 struct CameraTransition {
@@ -190,8 +193,10 @@ impl CameraResources {
     }
 
     /// The reverse of `world_to_screen`: the ray from the camera through
-    /// screen pixel (x, y) - its start (the camera, world space) and
-    /// direction (unit length). `None` if the projection can't be inverted.
+    /// screen pixel (x, y) - its start (the camera, world space - or, with
+    /// an orthographic lens, the pixel's own point on the near plane: every
+    /// pixel's ray runs the same way, from a different place) and direction
+    /// (unit length). `None` if the projection can't be inverted.
     pub fn screen_ray(&self, active: &CameraInstance, x: f32, y: f32, screen_width: u32, screen_height: u32) -> Option<(Point3<f32>, Vector3<f32>)> {
         let inverse = Matrix4::from(self.uniform.view_proj).try_inverse()?;
         let ndc_x = x / screen_width.max(1) as f32 * 2.0 - 1.0;
@@ -207,6 +212,11 @@ impl CameraResources {
         // Pointing away from the camera, whichever way the depth runs.
         if direction.dot(&active.camera.calc_forward_direction()) < 0.0 {
             direction = -direction;
+        }
+        if active.projection.is_orthographic() {
+            // Reversed depth: 1 is the near plane.
+            let start = unproject(1.0)?;
+            return Some((active.camera.position() + start, direction));
         }
         Some((active.camera.position(), direction))
     }
@@ -275,9 +285,7 @@ impl SceneCameras {
     /// choosing between a scene's own cameras still needs `select_camera`.
     pub(crate) fn create_camera(&mut self, name: impl Into<String>, transform: Transform3D, fovy: f32) -> &mut CameraInstance {
         let camera = Camera::new(transform);
-        // Far plane kept in sync with CameraResources::new's near_far_uniform
-        // and water.wgsl's `const FAR` - see the comment there.
-        let projection = Projection::new(self.width, self.height, fovy, 0.1, 4_000_000.0);
+        let projection = Projection::new(self.width, self.height, fovy, 0.1, DEFAULT_FAR);
 
         let name = name.into();
         if self.active == NO_CAMERA_SENTINEL || self.active == DEFAULT_CAMERA {
@@ -322,9 +330,15 @@ impl SceneCameras {
     /// camera that itself moves every frame - it just blends from wherever that
     /// happened to be this frame. Returns `false` (no-op, same as
     /// `select_camera`) if `name` isn't registered.
+    ///
+    /// Into or out of an orthographic camera there's nothing to blend (no
+    /// field of view to ease between) - that cuts straight to it instead.
     pub fn transition_to(&mut self, name: &str, duration: f32) -> bool {
-        if !self.cameras.contains_key(name) {
+        let Some(target) = self.cameras.get(name) else {
             return false;
+        };
+        if target.projection.is_orthographic() || self.active().projection.is_orthographic() {
+            return self.select_camera(name);
         }
         let active = self.active();
         self.transition = Some(CameraTransition {
@@ -400,18 +414,20 @@ impl SceneCameras {
 
     /// Puts camera `name` (registering it first if it's new) where a camera
     /// node is: at `position`, looking along `rotation`'s +Z with its +Y up,
-    /// with the lens given - drawn `viewport` big, or the whole screen. See
+    /// with `lens` - drawn its viewport big, or the whole screen. See
     /// `Scene::sync_cameras`.
-    pub(crate) fn place(&mut self, name: &str, position: Vector3<f32>, rotation: UnitQuaternion<f32>, fovy: f32, znear: f32, viewport: Option<(u32, u32)>) {
+    pub(crate) fn place(&mut self, name: &str, position: Vector3<f32>, rotation: UnitQuaternion<f32>, lens: &CameraLens) {
         if !self.cameras.contains_key(name) {
-            self.create_camera(name, Transform3D { position, ..Default::default() }, fovy);
+            self.create_camera(name, Transform3D { position, ..Default::default() }, lens.fovy);
         }
-        let (width, height) = viewport.unwrap_or((self.width, self.height));
+        let (width, height) = lens.viewport.unwrap_or((self.width, self.height));
         let Some(instance) = self.cameras.get_mut(name) else { return };
         instance.camera.set_position(Point3::from(position));
         instance.camera.set_orientation(rotation * Vector3::z(), rotation * Vector3::y());
-        instance.projection.fovy = fovy;
-        instance.projection.znear = znear;
+        instance.projection.fovy = lens.fovy;
+        instance.projection.orthographic = lens.orthographic;
+        instance.projection.znear = lens.znear;
+        instance.projection.set_zfar(lens.zfar.unwrap_or(DEFAULT_FAR));
         instance.projection.resize(width.max(1), height.max(1));
     }
 

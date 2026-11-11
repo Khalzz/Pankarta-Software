@@ -91,6 +91,10 @@ name = "meshes_and_models"
 path = "examples/3D/meshes_and_models.rs"
 
 [[example]]
+name = "orthographic"
+path = "examples/3D/orthographic.rs"
+
+[[example]]
 name = "far_from_origin"
 path = "examples/3D/far_from_origin.rs"
 

@@ -22,8 +22,14 @@ pub struct CameraUniform {
     // into a distance with (see standard_template.wgsl's linear_depth).
     near: f32,
     far: f32,
+    // 1 for an orthographic lens, 0 for a perspective one - how a depth
+    // turns into a distance, and which way a pixel is seen from.
+    orthographic: f32,
     // WGSL rounds the struct up to a multiple of 16 bytes.
-    _padding: [f32; 2],
+    _padding: f32,
+    // Which way the camera looks (unit length, w unused) - the way every
+    // pixel is seen from, with an orthographic lens.
+    forward: [f32; 4],
 }
 
 impl CameraUniform {
@@ -33,15 +39,21 @@ impl CameraUniform {
             view_position: [0.0; 4],
             near: near_far.near,
             far: near_far.far,
-            _padding: [0.0; 2],
+            orthographic: 0.0,
+            _padding: 0.0,
+            forward: [0.0, 0.0, 1.0, 0.0],
         }
     }
 
     pub fn update_view_proj(&mut self, camera: &Camera, projection: &Projection) {
         // The camera is always at the origin in the space these matrices operate in.
         self.view_position = [0.0, 0.0, 0.0, 1.0];
-        self.view_proj = (projection.calc_matrix() * camera.calc_matrix()).into();
+        let view = camera.calc_matrix();
+        self.view_proj = (projection.calc_matrix() * view).into();
         self.near = projection.znear;
         self.far = projection.zfar();
+        self.orthographic = if projection.is_orthographic() { 1.0 } else { 0.0 };
+        // The view matrix's third row is the camera's back (it looks down -Z).
+        self.forward = [-view[(2, 0)], -view[(2, 1)], -view[(2, 2)], 0.0];
     }
 }

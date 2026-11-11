@@ -14,6 +14,11 @@ struct CameraUniform {
     view_pos: vec4<f32>,
     near: f32,
     far: f32,
+    // 1: an orthographic lens (see CameraLens::orthographic), 0: perspective.
+    orthographic: f32,
+    _padding: f32,
+    // Which way the camera looks (xyz, unit length).
+    forward: vec4<f32>,
 };
 
 struct Transform {
@@ -76,19 +81,40 @@ struct Engine {
     // The camera's near and far planes - what `linear_depth` uses.
     near: f32,
     far: f32,
+    // Which way the camera looks (unit length), and whether its lens is
+    // orthographic - every pixel seen from that same way, not from a point
+    // (see `view_direction`).
+    camera_forward: vec3<f32>,
+    orthographic: bool,
 }
 var<private> engine: Engine;
 
 fn engine_values() -> Engine {
-    return Engine(light.time, light.camera_position, normalize(light.position), light.color, light.ambient, camera.near, camera.far);
+    return Engine(light.time, light.camera_position, normalize(light.position), light.color, light.ambient, camera.near, camera.far, camera.forward.xyz, camera.orthographic > 0.5);
 }
 
 // How far from the camera (world units) a raw depth is - one read from the
 // depth so far (`reads: [Depth]`), or a point's own (its clip-space z / w).
 // Depths here are reversed: 1 at the near plane, 0 at the far one.
 fn linear_depth(raw: f32) -> f32 {
+    if (camera.orthographic > 0.5) {
+        // An orthographic lens spreads depth evenly from near to far.
+        return camera.near + (1.0 - raw) * (camera.far - camera.near);
+    }
     let z = 1.0 - 2.0 * raw;
     return 2.0 * camera.near * camera.far / (camera.far + camera.near - z * (camera.far - camera.near));
+}
+
+// The way a point (camera-relative, like every hook's `position`) is seen
+// from: from the camera toward it (unit length). With an orthographic lens
+// every point is seen the same way - the way the camera looks. Turned
+// around (`-view_direction(p)`) it's toward the camera: for reflections,
+// glints and fresnel.
+fn view_direction(position: vec3<f32>) -> vec3<f32> {
+    if (camera.orthographic > 0.5) {
+        return camera.forward.xyz;
+    }
+    return normalize(position);
 }
 
 // The `vertex` hook's vertex: where it is (relative to the camera), its
@@ -331,8 +357,13 @@ fn vs_main(model: VertexInput, instance: InstanceInput) -> VertexOutput {
     out.world_position = v.position;
     out.clip_position = camera.view_proj * vec4<f32>(v.position, 1.0);
 
-    // Calculate view-space depth for fog, using the camera's view position
+    // How far away it is, for fog: from the camera - or, with an
+    // orthographic lens, along the way it looks (its position isn't where
+    // the view starts from).
     out.view_depth = length(camera.view_pos.xyz - out.world_position);
+    if (camera.orthographic > 0.5) {
+        out.view_depth = max(dot(out.world_position, camera.forward.xyz), 0.0);
+    }
 
     // Back into the object's own (scaled) space: the instance's matrix is
     // place x turn x size, and `normal_matrix` its turn alone - so undoing

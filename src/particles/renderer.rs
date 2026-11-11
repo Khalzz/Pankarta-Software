@@ -43,9 +43,6 @@ const MAX_EMITTERS: u32 = 256;
 /// The most points one trail keeps.
 const MAX_TRAIL_POINTS: usize = 4096;
 const WORKGROUP_SIZE: u32 = 64;
-/// Must match the camera projection's far plane (see camera/handler.rs) -
-/// the soft fade's depth comparison depends on it.
-const FAR_PLANE: f32 = 4_000_000.0;
 /// How long an emitter's velocity is averaged over (s) - long enough to
 /// smooth out physics steps landing unevenly across rendered frames, short
 /// enough to follow real speed changes.
@@ -165,6 +162,10 @@ pub struct ParticleFrameInfo {
     /// The camera's view matrix (`Camera::calc_matrix` - camera at origin).
     pub camera_view: Matrix4<f32>,
     pub near: f32,
+    /// The camera's far plane, and whether its lens is orthographic - how
+    /// the soft fade turns depths into distances.
+    pub far: f32,
+    pub orthographic: bool,
     /// 0 while paused - everything holds still.
     pub delta_time: f32,
     /// The physics world's gravity (m/s²) - what an effect's
@@ -768,7 +769,8 @@ impl ParticleRenderer {
         let sun = frame.sun_direction.try_normalize(1e-6).unwrap_or_else(Vector3::y);
         let gpu_frame = GpuFrame {
             camera_right: [right.x, right.y, right.z, frame.near],
-            camera_up: [up.x, up.y, up.z, FAR_PLANE],
+            // Negative for an orthographic lens (see particles.wgsl's linearize_depth).
+            camera_up: [up.x, up.y, up.z, if frame.orthographic { -frame.far } else { frame.far }],
             // Wrapped so it stays precise over a long session (it only feeds turbulence).
             camera_forward: [forward.x, forward.y, forward.z, self.time % 1000.0],
             camera_delta: [camera_delta.x, camera_delta.y, camera_delta.z, dt],

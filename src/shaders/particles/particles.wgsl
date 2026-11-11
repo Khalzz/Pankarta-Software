@@ -175,7 +175,12 @@ fn vs_main(@builtin(vertex_index) vertex: u32, @builtin(instance_index) instance
 
 // Same conversion as water.wgsl's: a raw reversed-Z depth value to a
 // distance along the view axis.
+// A negative `far` is an orthographic lens's (see ParticleRenderer's
+// camera_up.w): its depth is spread evenly from near to far.
 fn linearize_depth(raw: f32, near: f32, far: f32) -> f32 {
+    if (far < 0.0) {
+        return near + (1.0 - raw) * (-far - near);
+    }
     let depth = 1.0 - raw;
     let z_ndc = depth * 2.0 - 1.0;
     return (2.0 * near * far) / (far + near - z_ndc * (far - near));

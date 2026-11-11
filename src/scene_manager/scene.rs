@@ -278,9 +278,7 @@ impl Scene {
                 &id,
                 transform.position,
                 transform.rotation,
-                lens.fovy,
-                lens.znear,
-                lens.viewport,
+                &lens,
             );
         }
 
@@ -533,9 +531,7 @@ impl Scene {
                 &node.id,
                 transform.position,
                 transform.rotation,
-                lens.fovy,
-                lens.znear,
-                lens.viewport,
+                &lens,
             );
         }
     }
@@ -603,7 +599,7 @@ impl Scene {
             self.pending_bodies.push(id.to_owned());
         }
         if let Some(lens) = lens {
-            self.cameras.place(id, transform.position, transform.rotation, lens.fovy, lens.znear, lens.viewport);
+            self.cameras.place(id, transform.position, transform.rotation, &lens);
         }
     }
 

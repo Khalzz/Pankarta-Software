@@ -107,7 +107,9 @@ struct SunView {
     view_position: [f32; 4],
     near: f32,
     far: f32,
-    _padding: [f32; 2],
+    orthographic: f32,
+    _padding: f32,
+    forward: [f32; 4],
 }
 
 /// One cascade's part of the shadow pass.
@@ -340,7 +342,7 @@ impl ShadowRender {
         let cascades = (0..count).map(|index| {
             let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("shadow_sun_view"),
-                contents: bytemuck::cast_slice(&[SunView { view_proj: Matrix4::identity().into(), view_position: [0.0, 0.0, 0.0, 1.0], near: 0.0, far: 1.0, _padding: [0.0; 2] }]),
+                contents: bytemuck::cast_slice(&[SunView { view_proj: Matrix4::identity().into(), view_position: [0.0, 0.0, 0.0, 1.0], near: 0.0, far: 1.0, orthographic: 1.0, _padding: 0.0, forward: [0.0, -1.0, 0.0, 0.0] }]),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
             let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -415,7 +417,9 @@ impl ShadowRender {
             let projection = Orthographic3::new(centre.x - half, centre.x + half, centre.y - half, centre.y + half, -(centre.z + half + CASTER_REACH), half - centre.z);
             let view_proj = OPENGL_TO_WGPU_DEPTH * projection.to_homogeneous() * view;
             let raw: [[f32; 4]; 4] = view_proj.into();
-            queue.write_buffer(&cascade.buffer, 0, bytemuck::cast_slice(&[SunView { view_proj: raw, view_position: [0.0, 0.0, 0.0, 1.0], near: 0.0, far: 1.0, _padding: [0.0; 2] }]));
+            // The sun looks down its view's -z.
+            let forward = -Vector3::new(view[(2, 0)], view[(2, 1)], view[(2, 2)]);
+            queue.write_buffer(&cascade.buffer, 0, bytemuck::cast_slice(&[SunView { view_proj: raw, view_position: [0.0, 0.0, 0.0, 1.0], near: 0.0, far: 1.0, orthographic: 1.0, _padding: 0.0, forward: [forward.x, forward.y, forward.z, 0.0] }]));
 
             let mut hasher = DefaultHasher::new();
             hash_floats(&[grid.x, grid.y, grid.z, step, half], &mut hasher);

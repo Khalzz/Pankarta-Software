@@ -127,7 +127,11 @@ impl App {
             return;
         }
 
-        if let Some(skybox) = self.current_environment().skybox.as_ref() {
+        // The sky is a cube around the camera, drawn as if infinitely far -
+        // which only works with perspective: an orthographic lens would see
+        // it as a small square. It gets the clear color behind it instead.
+        let orthographic = self.scene_manager.cameras().is_some_and(|c| c.active().projection.is_orthographic());
+        if let Some(skybox) = self.current_environment().skybox.as_ref().filter(|_| !orthographic) {
             skybox.render(&mut render_pass, &self.renderer.camera_resources.bind_group);
         }
 

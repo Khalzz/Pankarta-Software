@@ -275,6 +275,8 @@ impl App {
             camera_position,
             camera_view: active.camera.calc_matrix(),
             near: active.projection.znear,
+            far: active.projection.zfar(),
+            orthographic: active.projection.is_orthographic(),
             delta_time: self.time.delta_time,
             gravity: self.physics.gravity(),
             sun_direction: Vector3::from(light.position),

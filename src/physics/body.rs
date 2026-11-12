@@ -3,6 +3,8 @@
 
 use nalgebra::Vector3;
 
+use crate::ui::color::UiColor;
+
 /// One collider on a body: its `shape`, where it sits on the body, and how
 /// it touches things - see `Collider::new` and its builder methods.
 #[derive(Debug, Clone)]
@@ -21,13 +23,16 @@ pub struct Collider {
     /// For a sensor: the layers (see `Layers`) of the nodes it detects -
     /// empty for every node.
     pub detects: Vec<String>,
+    /// Draws this collider, whatever debug views are on - see
+    /// `ColliderDebug`.
+    pub debug: Option<ColliderDebug>,
 }
 
 impl Collider {
     /// A collider of `shape` at the body's center, touching things the
     /// default way.
     pub fn new(shape: ColliderShape) -> Self {
-        Self { shape, offset: Vector3::zeros(), friction: None, restitution: None, sensor: false, detects: Vec::new() }
+        Self { shape, offset: Vector3::zeros(), friction: None, restitution: None, sensor: false, detects: Vec::new(), debug: None }
     }
 
     /// Placed `offset` from the body's center (in the body's frame).
@@ -60,6 +65,96 @@ impl Collider {
     pub fn detects<S: Into<String>>(mut self, layers: impl IntoIterator<Item = S>) -> Self {
         self.detects = layers.into_iter().map(Into::into).collect();
         self
+    }
+
+    /// Draws this collider in the world as `debug` says - just this one,
+    /// with no debug view on.
+    pub fn debug(mut self, debug: ColliderDebug) -> Self {
+        self.debug = Some(debug);
+        self
+    }
+}
+
+/// How one collider is drawn for debugging (see `Collider::debug`,
+/// `Sensor::debug`): its edges and its faces, each in a color of its own or
+/// not at all - over everything, so it shows through walls. A sensor with
+/// something inside it uses the `occupied_` colors.
+///
+///     Sensor::sphere(2.0).debug(ColliderDebug::new()
+///         .edges(UiColor::Rgb(255, 200, 0))
+///         .faces(UiColor::Rgba(255, 200, 0, 40)))
+#[derive(Debug, Clone, Copy)]
+pub struct ColliderDebug {
+    pub edges: Option<UiColor>,
+    pub faces: Option<UiColor>,
+    pub occupied_edges: Option<UiColor>,
+    pub occupied_faces: Option<UiColor>,
+}
+
+impl Default for ColliderDebug {
+    /// Cyan edges and see-through cyan faces - green ones while a sensor has
+    /// something inside.
+    fn default() -> Self {
+        Self {
+            edges: Some(UiColor::Rgb(50, 205, 255)),
+            faces: Some(UiColor::Rgba(50, 205, 255, 40)),
+            occupied_edges: Some(UiColor::Rgb(50, 255, 80)),
+            occupied_faces: Some(UiColor::Rgba(50, 255, 80, 50)),
+        }
+    }
+}
+
+impl ColliderDebug {
+    /// The default look - see `Default`.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Its edges in `color` - the alpha is ignored. Also while occupied,
+    /// unless `occupied_edges` says otherwise.
+    pub fn edges(mut self, color: UiColor) -> Self {
+        self.edges = Some(color);
+        self.occupied_edges = Some(color);
+        self
+    }
+
+    /// Its faces in `color` - give it some transparency to see through it.
+    /// Also while occupied, unless `occupied_faces` says otherwise.
+    pub fn faces(mut self, color: UiColor) -> Self {
+        self.faces = Some(color);
+        self.occupied_faces = Some(color);
+        self
+    }
+
+    /// A sensor's edges while something's inside it.
+    pub fn occupied_edges(mut self, color: UiColor) -> Self {
+        self.occupied_edges = Some(color);
+        self
+    }
+
+    /// A sensor's faces while something's inside it.
+    pub fn occupied_faces(mut self, color: UiColor) -> Self {
+        self.occupied_faces = Some(color);
+        self
+    }
+
+    /// No edges.
+    pub fn no_edges(mut self) -> Self {
+        self.edges = None;
+        self.occupied_edges = None;
+        self
+    }
+
+    /// No faces.
+    pub fn no_faces(mut self) -> Self {
+        self.faces = None;
+        self.occupied_faces = None;
+        self
+    }
+
+    /// The edge and face colors for `occupied` or not.
+    pub fn colors(&self, occupied: bool) -> (Option<UiColor>, Option<UiColor>) {
+        if occupied { (self.occupied_edges, self.occupied_faces) } else { (self.edges, self.faces) }
     }
 }
 
@@ -108,6 +203,25 @@ pub enum ColliderShape {
     // shape that follows an outline more closely than a box, still cheap
     // and stable for a moving body.
     ConvexHull { points: Vec<Vector3<f32>> },
+}
+
+impl ColliderShape {
+    /// Half a ball of `radius`, its flat side down on the center - a dome. A
+    /// `ConvexHull` around points on it.
+    pub fn hemisphere(radius: f32) -> Self {
+        const RINGS: usize = 6;
+        const SEGMENTS: usize = 16;
+        let mut points = vec![Vector3::y() * radius];
+        for ring in 0..RINGS {
+            // From the flat edge (0) up to just under the top.
+            let (rise, out) = (ring as f32 / RINGS as f32 * std::f32::consts::FRAC_PI_2).sin_cos();
+            for segment in 0..SEGMENTS {
+                let (sin, cos) = (segment as f32 / SEGMENTS as f32 * std::f32::consts::TAU).sin_cos();
+                points.push(Vector3::new(cos * out, rise, sin * out) * radius);
+            }
+        }
+        ColliderShape::ConvexHull { points }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -188,6 +302,11 @@ impl Sensor {
         Self::shape(ColliderShape::Ball { radius })
     }
 
+    /// Half a ball of `radius`, its flat side down on the node - a dome.
+    pub fn hemisphere(radius: f32) -> Self {
+        Self::shape(ColliderShape::hemisphere(radius))
+    }
+
     /// A box reaching `half_extents` from the node each way.
     pub fn cuboid(half_extents: Vector3<f32>) -> Self {
         Self::shape(ColliderShape::Cuboid { half_extents: (half_extents.x, half_extents.y, half_extents.z) })
@@ -225,6 +344,13 @@ impl Sensor {
     /// with a body by default.
     pub fn detects<S: Into<String>>(mut self, layers: impl IntoIterator<Item = S>) -> Self {
         self.collider = self.collider.detects(layers);
+        self
+    }
+
+    /// Draws its area as `debug` says (`ColliderDebug::new()` for the
+    /// default look) - with no debug view on.
+    pub fn debug(mut self, debug: ColliderDebug) -> Self {
+        self.collider = self.collider.debug(debug);
         self
     }
 }

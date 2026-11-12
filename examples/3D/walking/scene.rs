@@ -11,6 +11,7 @@ use pankarta_software::ui::TextStyle;
 
 use crate::player::Player;
 use crate::sign::sign_glass;
+use crate::sensor_gallery::{sensor_gallery, SENSORS};
 use crate::zone::zone;
 
 pub struct WalkingScene {
@@ -111,6 +112,8 @@ impl WalkingScene {
         let pad = zone("zone", Vector3::new(-4.0, 0.0, -6.0));
 
         let mut nodes = vec![ground, player, plane, sun, glass, pad];
+        // Sensors of every shape, outside the cubes - see sensor_gallery.rs.
+        nodes.extend(sensor_gallery());
 
         for index in 0..12 {
             let angle = index as f32 / 12.0 * std::f32::consts::TAU;
@@ -193,8 +196,14 @@ impl SceneBehaviour for WalkingScene {
                 label.set_text(ambient_ground_text(self.ambient_ground));
             }
             if let Some(label) = ui.label_mut("zone") {
-                let inside = app.physics.is_inside("zone", "player");
-                label.set_text(if inside { "In the blue zone" } else { "" });
+                let mut inside: Vec<&str> = SENSORS.iter()
+                    .filter(|(id, _)| app.physics.is_inside(id, "player"))
+                    .map(|(_, name)| *name)
+                    .collect();
+                if app.physics.is_inside("zone", "player") {
+                    inside.push("blue zone");
+                }
+                label.set_text(if inside.is_empty() { String::new() } else { format!("Inside: {}", inside.join(", ")) });
             }
         }
 

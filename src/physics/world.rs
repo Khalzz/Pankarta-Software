@@ -24,12 +24,13 @@ use std::collections::{HashMap, HashSet};
 
 use nalgebra::{Isometry3, Point3, UnitQuaternion, Vector3};
 use rapier3d::prelude::{
-    CCDSolver, Collider, ColliderSet, DefaultBroadPhase, ImpulseJointSet, IntegrationParameters, IslandManager, MultibodyJointSet, NarrowPhase,
+    CCDSolver, Collider, ColliderHandle, ColliderSet, DefaultBroadPhase, ImpulseJointSet, IntegrationParameters, IslandManager, MultibodyJointSet, NarrowPhase,
     PhysicsPipeline, QueryFilter, QueryPipeline, Ray, RigidBody, RigidBodyHandle, RigidBodySet, RigidBodyType, Shape,
 };
 
+use crate::physics::body::ColliderDebug;
 use crate::physics::physics_resources::{load_physics_from_definitions, LayerBits, PhysicsObjectDef};
-use crate::rendering::lines::Lines;
+use crate::rendering::lines::{Faces, Lines};
 
 /// What a ray hit - see `PhysicsWorld::cast_ray`.
 #[derive(Debug, Clone)]
@@ -95,6 +96,10 @@ pub struct PhysicsWorld {
     /// Whether the sensors' debug view is on (`app.renderer.debug.sensors`).
     sensor_view: bool,
     lines: Lines,
+    /// Debugged colliders' faces (see `ColliderDebug`), drawn this frame.
+    faces: Faces,
+    /// Every collider with its own `ColliderDebug`.
+    debugged: HashMap<ColliderHandle, ColliderDebug>,
     /// The bit each layer name got (see `Layers`).
     layers: LayerBits,
     /// Every node with a sensor, and the nodes overlapping it as of the
@@ -135,6 +140,8 @@ impl PhysicsWorld {
             debug_view: false,
             sensor_view: false,
             lines: Lines::default(),
+            faces: Faces::default(),
+            debugged: HashMap::new(),
             layers: LayerBits::default(),
             sensors: HashMap::new(),
             sensor_events: Vec::new(),
@@ -324,7 +331,7 @@ impl PhysicsWorld {
         let id = def.id.clone();
         self.remove_body(&id);
         let mut loaded = HashMap::new();
-        load_physics_from_definitions(std::slice::from_ref(&def), &mut self.colliders, &mut self.bodies, &mut loaded, &mut self.layers);
+        load_physics_from_definitions(std::slice::from_ref(&def), &mut self.colliders, &mut self.bodies, &mut loaded, &mut self.layers, &mut self.debugged);
         if let Some(Some(data)) = loaded.remove(&id) {
             if def.physics.colliders.iter().any(|collider| collider.sensor) {
                 self.sensors.insert(id.clone(), HashSet::new());
@@ -343,6 +350,11 @@ impl PhysicsWorld {
         // What it overlapped hears it leave after the next step.
         self.sensors.remove(id);
         self.followers.remove(id);
+        if let Some(body) = self.bodies.get(handle) {
+            for collider in body.colliders() {
+                self.debugged.remove(collider);
+            }
+        }
         self.owners.remove(&handle);
         self.previous.remove(&handle);
         self.bodies.remove(handle, &mut self.islands, &mut self.colliders, &mut self.impulse_joints, &mut self.multibody_joints, true);
@@ -378,6 +390,7 @@ impl PhysicsWorld {
         self.debug_view = debug_view;
         self.sensor_view = sensor_view;
         self.lines.clear();
+        self.faces.clear();
         if !self.running {
             return 0;
         }
@@ -468,39 +481,96 @@ impl PhysicsWorld {
     /// drawn this frame - static ones (the ground) skipped, they'd bury the
     /// screen - and every sensor, cyan, green while something overlaps it.
     /// While the physics debug view is on - or just the sensors, while
-    /// theirs is.
+    /// theirs is. A collider with its own `ColliderDebug` is drawn its own
+    /// way, views on or not.
     pub(crate) fn draw_colliders(&mut self) {
-        if !self.debug_view && !self.sensor_view {
+        if !self.debug_view && !self.sensor_view && self.debugged.is_empty() {
             return;
         }
         const COLLIDER_COLOR: [f32; 3] = [1.0, 0.55, 0.1];
-        const SENSOR_COLOR: [f32; 3] = [0.2, 0.8, 1.0];
-        const OCCUPIED_SENSOR_COLOR: [f32; 3] = [0.2, 1.0, 0.3];
+        let default_look = ColliderDebug::default().no_faces();
         let mut lines = std::mem::take(&mut self.lines);
+        let mut faces = std::mem::take(&mut self.faces);
         for (handle, body) in self.bodies.iter() {
-            let pose = self.render_pose(handle, body);
             let occupied = self.owners.get(&handle).and_then(|id| self.sensors.get(id)).is_some_and(|inside| !inside.is_empty());
-            for collider in body.colliders().iter().filter_map(|collider| self.colliders.get(*collider)).filter(|collider| collider.is_enabled()) {
-                let shown = if collider.is_sensor() { self.debug_view || self.sensor_view } else { self.debug_view && !body.is_fixed() };
-                if !shown {
-                    continue;
-                }
-                let local = collider.position_wrt_parent().copied().unwrap_or_else(Isometry3::identity);
-                let color = match (collider.is_sensor(), occupied) {
-                    (false, _) => COLLIDER_COLOR,
-                    (true, false) => SENSOR_COLOR,
-                    (true, true) => OCCUPIED_SENSOR_COLOR,
+            let mut pose = None;
+            for &collider_handle in body.colliders() {
+                let Some(collider) = self.colliders.get(collider_handle).filter(|collider| collider.is_enabled()) else { continue };
+                let (edges, face_color) = match self.debugged.get(&collider_handle) {
+                    Some(look) => {
+                        let (edges, faces) = look.colors(occupied);
+                        (edges.map(rgb), faces.map(|color| color.to_rgba_f32()))
+                    }
+                    None if collider.is_sensor() && (self.debug_view || self.sensor_view) => (default_look.colors(occupied).0.map(rgb), None),
+                    None if !collider.is_sensor() && self.debug_view && !body.is_fixed() => (Some(COLLIDER_COLOR), None),
+                    None => continue,
                 };
-                draw_shape(&mut lines, &(pose * local), collider.shape(), color);
+                let pose = *pose.get_or_insert_with(|| self.render_pose(handle, body));
+                let at = pose * collider.position_wrt_parent().copied().unwrap_or_else(Isometry3::identity);
+                if let Some(color) = face_color {
+                    draw_faces(&mut faces, &at, collider.shape(), color);
+                }
+                if let Some(color) = edges {
+                    draw_shape(&mut lines, &at, collider.shape(), color);
+                }
             }
         }
         self.lines = lines;
+        self.faces = faces;
+    }
+
+    /// The faces debugged colliders drew this frame (see `ColliderDebug`).
+    pub(crate) fn faces(&self) -> &Faces {
+        &self.faces
+    }
+}
+
+fn rgb(color: crate::ui::color::UiColor) -> [f32; 3] {
+    let [r, g, b, _] = color.to_rgba_f32();
+    [r, g, b]
+}
+
+/// `shape` at `pose` as triangles into `faces` - the shapes `draw_shape`
+/// draws, and convex hulls and triangle meshes.
+fn draw_faces(faces: &mut Faces, pose: &Isometry3<f32>, shape: &dyn Shape, color: [f32; 4]) {
+    const ROUND: u32 = 24;
+    let (points, triangles) = if let Some(cuboid) = shape.as_cuboid() {
+        cuboid.to_trimesh()
+    } else if let Some(ball) = shape.as_ball() {
+        ball.to_trimesh(ROUND, ROUND / 2)
+    } else if let Some(cylinder) = shape.as_cylinder() {
+        cylinder.to_trimesh(ROUND)
+    } else if let Some(capsule) = shape.as_capsule() {
+        capsule.to_trimesh(ROUND, ROUND / 2)
+    } else if let Some(hull) = shape.as_convex_polyhedron() {
+        // Each flat face as triangles from its middle.
+        let mut points = hull.points().to_vec();
+        let mut triangles = Vec::new();
+        let around = hull.vertices_adj_to_face();
+        for face in hull.faces() {
+            let corners = &around[face.first_vertex_or_edge as usize..(face.first_vertex_or_edge + face.num_vertices_or_edges) as usize];
+            let middle = corners.iter().map(|corner| points[*corner as usize].coords).sum::<Vector3<f32>>() / corners.len() as f32;
+            let center = points.len() as u32;
+            points.push(Point3::from(middle));
+            for (index, corner) in corners.iter().enumerate() {
+                triangles.push([center, *corner, corners[(index + 1) % corners.len()]]);
+            }
+        }
+        (points, triangles)
+    } else if let Some(mesh) = shape.as_trimesh() {
+        (mesh.vertices().to_vec(), mesh.indices().to_vec())
+    } else {
+        return;
+    };
+    let world: Vec<Vector3<f32>> = points.iter().map(|point| (pose * point).coords).collect();
+    for [a, b, c] in triangles {
+        faces.triangle(world[a as usize], world[b as usize], world[c as usize], color);
     }
 }
 
 /// `shape` at `pose` into `lines` - boxes as their 12 edges, balls as 3
-/// circles, cylinders and capsules as their circles and 4 sides. Other
-/// shapes aren't drawn.
+/// circles, cylinders and capsules as their circles and 8 sides, convex
+/// hulls and triangle meshes as their edges. Other shapes aren't drawn.
 pub fn draw_shape(lines: &mut Lines, pose: &Isometry3<f32>, shape: &dyn Shape, color: [f32; 3]) {
     let world = |local: Vector3<f32>| (pose * Point3::from(local)).coords;
 
@@ -526,8 +596,10 @@ pub fn draw_shape(lines: &mut Lines, pose: &Isometry3<f32>, shape: &dyn Shape, c
         for y in [-h, h] {
             circle(lines, &world, Vector3::y() * y, Vector3::x() * r, Vector3::z() * r, color);
         }
-        for side in [Vector3::x(), -Vector3::x(), Vector3::z(), -Vector3::z()] {
-            lines.line(world(side * r - Vector3::y() * h), world(side * r + Vector3::y() * h), color);
+        for side in 0..8 {
+            let (sin, cos) = (side as f32 / 8.0 * std::f32::consts::TAU).sin_cos();
+            let side = Vector3::new(cos, 0.0, sin) * r;
+            lines.line(world(side - Vector3::y() * h), world(side + Vector3::y() * h), color);
         }
     } else if let Some(capsule) = shape.as_capsule() {
         // Its two ball centers, wherever along its axis they are.
@@ -540,8 +612,25 @@ pub fn draw_shape(lines: &mut Lines, pose: &Isometry3<f32>, shape: &dyn Shape, c
             circle(lines, &world, center, side_a * r, axis * r, color);
             circle(lines, &world, center, side_b * r, axis * r, color);
         }
-        for side in [side_a, -side_a, side_b, -side_b] {
+        for side in 0..8 {
+            let (sin, cos) = (side as f32 / 8.0 * std::f32::consts::TAU).sin_cos();
+            let side = side_a * cos + side_b * sin;
             lines.line(world(a + side * r), world(b + side * r), color);
+        }
+    } else if let Some(hull) = shape.as_convex_polyhedron() {
+        // Its faces' outlines - not the lines splitting a flat face into
+        // triangles (both sides of one of those are the same face).
+        let points = hull.points();
+        for edge in hull.edges().iter().filter(|edge| edge.faces.x != edge.faces.y) {
+            lines.line(world(points[edge.vertices.x as usize].coords), world(points[edge.vertices.y as usize].coords), color);
+        }
+    } else if let Some(mesh) = shape.as_trimesh() {
+        let points = mesh.vertices();
+        for [a, b, c] in mesh.indices() {
+            let [a, b, c] = [a, b, c].map(|index| world(points[*index as usize].coords));
+            lines.line(a, b, color);
+            lines.line(b, c, color);
+            lines.line(c, a, color);
         }
     }
 }
@@ -623,6 +712,59 @@ mod tests {
         world.step();
         assert_eq!(world.exited("zone").collect::<Vec<_>>(), vec!["rock"]);
         assert_eq!(world.inside("zone").count(), 0);
+    }
+
+    #[test]
+    fn debugged_collider_draws_with_no_view_on() {
+        let mut world = PhysicsWorld::new();
+        let sensor = Sensor::sphere(1.0).debug(crate::physics::ColliderDebug::new());
+        world.start(vec![
+            def("zone", Vector3::zeros(), Physics { rigidbody: RigidBodyData::default(), colliders: vec![sensor.collider] }, &[], true),
+            ball("rock", 10.0, &[]),
+        ]);
+        world.steps_due(0.0, false, false);
+        world.draw_colliders();
+        assert!(!world.lines().is_empty() && !world.faces().is_empty());
+        // Only the debugged one: the rock's edges aren't there.
+        let segments = world.lines().segments().len();
+        world.remove_body("zone");
+        world.steps_due(0.0, false, false);
+        world.draw_colliders();
+        assert!(world.lines().is_empty() && world.faces().is_empty() && segments > 0);
+    }
+
+    #[test]
+    fn hemisphere_is_only_the_top_half() {
+        let mut world = PhysicsWorld::new();
+        let zone = Sensor::hemisphere(2.0);
+        world.start(vec![
+            def("dome", Vector3::zeros(), Physics { rigidbody: RigidBodyData::default(), colliders: vec![zone.collider] }, &[], true),
+            ball("above", 0.0, &[]),
+            ball("below", 0.0, &[]),
+        ]);
+        world.set_gravity(Vector3::zeros());
+        world.teleport("above", Vector3::new(0.0, 1.0, 0.0), UnitQuaternion::identity());
+        world.teleport("below", Vector3::new(0.0, -1.0, 0.0), UnitQuaternion::identity());
+        world.step();
+        assert!(world.is_inside("dome", "above"));
+        assert!(!world.is_inside("dome", "below"));
+    }
+
+    #[test]
+    fn hemisphere_outline_has_no_lines_across_its_base() {
+        let shape = rapier3d::prelude::SharedShape::convex_hull(&match ColliderShape::hemisphere(2.0) {
+            ColliderShape::ConvexHull { points } => points.into_iter().map(Point3::from).collect::<Vec<_>>(),
+            _ => unreachable!(),
+        }).unwrap();
+        let mut lines = Lines::default();
+        draw_shape(&mut lines, &Isometry3::identity(), &*shape, [1.0; 3]);
+        // On the ground, only the rim - no line through the inside of the base.
+        for [a, b] in lines.segments() {
+            if a.position[1].abs() < 1e-4 && b.position[1].abs() < 1e-4 {
+                let middle = Vector3::from(a.position).lerp(&Vector3::from(b.position), 0.5);
+                assert!(middle.norm() > 1.9, "a line across the base: {a:?} {b:?}");
+            }
+        }
     }
 
     #[test]

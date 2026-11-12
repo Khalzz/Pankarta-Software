@@ -136,7 +136,7 @@ impl LayerBits {
 
 /// Seeds `collider_set`/`rigidbody_set` from the scene's `PhysicsObjectDef`s
 /// (see that type's own doc comment) - one body each, with its colliders.
-pub(crate) fn load_physics_from_definitions(defs: &[PhysicsObjectDef], collider_set: &mut ColliderSet, rigidbody_set: &mut RigidBodySet, physics_handlers: &mut HashMap<String, Option<PhysicsData>>, layers: &mut LayerBits) {
+pub(crate) fn load_physics_from_definitions(defs: &[PhysicsObjectDef], collider_set: &mut ColliderSet, rigidbody_set: &mut RigidBodySet, physics_handlers: &mut HashMap<String, Option<PhysicsData>>, layers: &mut LayerBits, debugged: &mut HashMap<ColliderHandle, body::ColliderDebug>) {
     for def in defs {
         let mut rigid_body = if def.follows_node {
             RigidBodyBuilder::kinematic_position_based().translation(def.position).build()
@@ -189,6 +189,9 @@ pub(crate) fn load_physics_from_definitions(defs: &[PhysicsObjectDef], collider_
                 builder = builder.restitution(restitution).restitution_combine_rule(CoefficientCombineRule::Max);
             }
             let handle = collider_set.insert_with_parent(builder.build(), rigidbody_handle, rigidbody_set);
+            if let Some(debug) = collider_data.debug {
+                debugged.insert(handle, debug);
+            }
             collider_handles.push(handle);
         }
 

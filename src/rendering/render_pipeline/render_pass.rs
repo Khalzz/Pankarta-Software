@@ -692,7 +692,9 @@ impl App {
     // and HUD - is copied and blurred first, so that layer's blur shows the
     // HUD behind it instead of painting the bare world over it.
     fn render_ui_pass(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, which: UiPass, frame: Option<&wgpu::Texture>) {
-        if self.ui.ui_rendering.num_indices == 0 && self.ui.image_draws.is_empty() {
+        // The debug lines and faces are drawn here too - with no UI, still.
+        let debug_drawing = !self.renderer.lines.is_empty() || !self.physics.lines().is_empty() || !self.physics.faces().is_empty();
+        if self.ui.ui_rendering.num_indices == 0 && self.ui.image_draws.is_empty() && !debug_drawing {
             return;
         }
         // ui_rendering.uses_blur is only the on-top layer's by now (see
@@ -728,8 +730,10 @@ impl App {
 
         // The game's lines (and the physics debug view's), under the UI.
         if lines {
-            let Renderer { line_renderer, lines, debug, device, queue, light, camera_resources, .. } = &mut self.renderer;
-            let physics: &Lines = if debug.physics || debug.sensors { self.physics.lines() } else { &Lines::default() };
+            let Renderer { line_renderer, face_renderer, lines, device, queue, light, camera_resources, .. } = &mut self.renderer;
+            // Only what's on is in them (see PhysicsWorld::draw_colliders).
+            let physics: &Lines = self.physics.lines();
+            face_renderer.draw(device, queue, &mut render_pass, &light.rendering_data.bind_group, &camera_resources.bind_group, self.physics.faces());
             line_renderer.draw(device, queue, &mut render_pass, &light.rendering_data.bind_group, &camera_resources.bind_group, &[lines, physics]);
         }
 

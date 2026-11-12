@@ -91,6 +91,7 @@ pub struct Renderer {
   /// The engine's debug views - see rendering::debug_views.
   pub debug: DebugViews,
   pub(crate) line_renderer: LineRenderer,
+  pub(crate) face_renderer: crate::rendering::lines::FaceRenderer,
   pub(crate) wireframe: WireframeRenderer,
   /// What's drawn behind everything - see `set_environment`.
   environment: Environment,
@@ -243,6 +244,7 @@ impl Renderer {
     crate::ui::widgets::dropdown::add_icon_shaders(&mut shaders);
 
     let line_renderer = LineRenderer::new(&device, config.format, &light.rendering_data.bind_group_layout, &camera_resources.bind_group_layout);
+    let face_renderer = crate::rendering::lines::FaceRenderer::new(&device, config.format, &light.rendering_data.bind_group_layout, &camera_resources.bind_group_layout);
     let wireframe = WireframeRenderer::new(&device, config.format, &camera_resources.bind_group_layout);
     let shapes_2d = crate::rendering::shapes_2d::Shapes2D::new(&device, config.format);
 
@@ -278,6 +280,7 @@ impl Renderer {
       lines: Lines::default(),
       debug: DebugViews::default(),
       line_renderer,
+      face_renderer,
       wireframe,
       ambient_light: [0.25, 0.25, 0.3],
       ambient_ground: 0.45,

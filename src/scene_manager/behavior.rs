@@ -88,4 +88,17 @@ pub trait Behavior: Any + AsAny {
     fn on_origin_shift(&mut self, node: &mut Node, scene: &mut SceneAccess, app: &mut App, shift: Vector3<f32>) {
         let _ = (node, scene, app, shift);
     }
+
+    /// Runs when node `other` (its id) starts overlapping this node's
+    /// `Sensor` (or a `Collider::sensor` on its body) - right after the
+    /// physics step it happened in. `scene.get_node(other)` to look at it.
+    fn on_sensor_enter(&mut self, node: &mut Node, other: &str, scene: &mut SceneAccess, app: &mut App) {
+        let _ = (node, other, scene, app);
+    }
+
+    /// Runs when node `other` stops overlapping this node's sensor - moved
+    /// out, or despawned.
+    fn on_sensor_exit(&mut self, node: &mut Node, other: &str, scene: &mut SceneAccess, app: &mut App) {
+        let _ = (node, other, scene, app);
+    }
 }

@@ -235,6 +235,20 @@ impl SceneNodes {
         self.run_behaviors(cameras, app, changes, |node, scene, app| node.run_fixed_update(scene, app));
     }
 
+    /// Hands each of `events` to its sensor node's behaviors
+    /// (`on_sensor_enter`/`on_sensor_exit`) - right after the physics step
+    /// they came from.
+    pub(crate) fn sensor_events(&mut self, events: &[crate::physics::SensorEvent], cameras: &mut SceneCameras, app: &mut App, changes: &mut SceneChanges) {
+        for event in events {
+            if !self.nodes.get(&event.sensor).is_some_and(Node::has_behaviors) {
+                continue;
+            }
+            let Some(mut node) = self.nodes.remove(&event.sensor) else { continue };
+            node.run_sensor_event(event, &mut SceneAccess::new(self, cameras, changes), app);
+            self.nodes.insert(event.sensor.clone(), node);
+        }
+    }
+
     /// Runs every node's attached behaviors' `on_origin_shift` - right after
     /// the floating origin moved the world by `shift` (see `WorldOrigin`).
     pub(crate) fn origin_shift(&mut self, cameras: &mut SceneCameras, app: &mut App, changes: &mut SceneChanges, shift: Vector3<f32>) {

@@ -230,6 +230,17 @@ impl Node {
         self.behaviors = behaviors;
     }
 
+    pub(crate) fn run_sensor_event(&mut self, event: &crate::physics::SensorEvent, scene: &mut SceneAccess, app: &mut App) {
+        let mut behaviors = std::mem::take(&mut self.behaviors);
+        for behavior in behaviors.iter_mut() {
+            match event.change {
+                crate::physics::SensorChange::Entered => behavior.on_sensor_enter(self, &event.other, scene, app),
+                crate::physics::SensorChange::Exited => behavior.on_sensor_exit(self, &event.other, scene, app),
+            }
+        }
+        self.behaviors = behaviors;
+    }
+
     pub(crate) fn run_fixed_update(&mut self, scene: &mut SceneAccess, app: &mut App) {
         let mut behaviors = std::mem::take(&mut self.behaviors);
         for behavior in behaviors.iter_mut() {

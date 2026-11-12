@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use nalgebra::Vector3;
 
-use crate::physics::{Collider, ColliderShape, Physics};
+use crate::physics::{Collider, ColliderShape, Layers, Physics, RigidBodyData, Sensor};
+use crate::scene_manager::node::Node;
+use crate::scene_manager::node::properties::Model;
 use crate::physics::physics_resources::PhysicsObjectDef;
 
 use super::scene::Scene;
@@ -27,18 +29,30 @@ use super::scene::Scene;
 /// Unlike `register_static_model`, this never needs to run again for the
 /// same id later - a body's starting position/mass/colliders are only read
 /// once, when it's made; from then on the body is where it is.
+///
+/// A node's `Sensor` is one more collider on its body - or, without
+/// `Physics`, its whole body, one that follows the node.
 pub fn register_physics_body(scene: &mut Scene, id: &str, trimeshes: &TrimeshCache) -> Result<(), String> {
     let node = scene.content.nodes.get(id).ok_or_else(|| format!("no node named '{id}' to register"))?;
     let transform = *node.transform_3d().ok_or_else(|| format!("node '{id}' has no Transform3D property"))?;
-    let mut physics = node.get_property::<Physics>().ok_or_else(|| format!("node '{id}' has no Physics property"))?.clone();
+    let sensor = node.get_property::<Sensor>();
+    let follows_node = node.get_property::<Physics>().is_none();
+    let mut physics = match node.get_property::<Physics>() {
+        Some(physics) => physics.clone(),
+        None if sensor.is_some() => Physics { rigidbody: RigidBodyData::default(), colliders: Vec::new() },
+        None => return Err(format!("node '{id}' has no Physics or Sensor property")),
+    };
+    physics.colliders.extend(sensor.map(|sensor| sensor.collider.clone()));
+    let layers = node.get_property::<Layers>().map(|layers| layers.0.clone()).unwrap_or_default();
 
     // Geometry read from a model file is scaled the way the model is drawn.
     let geometry_scale = transform.scale.component_mul(&super::render_bridge::geometry_scale(node));
+    let own_model = node.get_property::<Model>().and_then(Model::file_path).map(str::to_owned);
     physics.colliders = physics.colliders.into_iter()
-        .map(|collider| resolve_collider(collider, geometry_scale, id, trimeshes))
+        .map(|collider| resolve_collider(collider, geometry_scale, id, own_model.as_deref(), trimeshes))
         .collect();
 
-    scene.content.physics_bodies.push(PhysicsObjectDef { id: id.to_owned(), position: transform.position, rotation: transform.rotation, physics });
+    scene.content.physics_bodies.push(PhysicsObjectDef { id: id.to_owned(), position: transform.position, rotation: transform.rotation, physics, layers, follows_node });
 
     Ok(())
 }
@@ -49,13 +63,21 @@ pub type Trimesh = (Vec<Vector3<f32>>, Vec<[u32; 3]>);
 /// `ColliderShape::TrimeshFromModel`) - or why one couldn't be.
 pub type TrimeshCache = HashMap<String, Result<Trimesh, String>>;
 
-/// Every model path `physics` reads a mesh collider from - for the scene's
+/// Whether `node` gets a body - it has `Physics` or a `Sensor`.
+pub(crate) fn has_body(node: &Node) -> bool {
+    node.get_property::<Physics>().is_some() || node.get_property::<Sensor>().is_some()
+}
+
+/// Every model path `node`'s colliders read a mesh from - for the scene's
 /// loading step to read ahead.
-pub(crate) fn trimesh_paths(physics: &Physics) -> impl Iterator<Item = &str> {
-    physics.colliders.iter().filter_map(|collider| match &collider.shape {
-        ColliderShape::TrimeshFromModel { model_path } => Some(model_path.as_str()),
+pub(crate) fn trimesh_paths(node: &Node) -> Vec<&str> {
+    let physics = node.get_property::<Physics>().map(|physics| physics.colliders.as_slice()).unwrap_or_default();
+    let sensor = node.get_property::<Sensor>().map(|sensor| &sensor.collider);
+    physics.iter().chain(sensor).filter_map(|collider| match &collider.shape {
+        ColliderShape::TrimeshFromModel { model_path } | ColliderShape::ConvexHullFromModel { model_path } => Some(model_path.as_str()),
+        ColliderShape::ConvexHullFromOwnModel => node.get_property::<Model>().and_then(Model::file_path),
         _ => None,
-    })
+    }).collect()
 }
 
 /// Reads the mesh at `model_path` (inside the assets folder) for a collider.
@@ -63,8 +85,21 @@ pub(crate) fn load_trimesh(model_path: &str) -> Result<Trimesh, String> {
     crate::asset_manager::gltf::load_trimesh_geometry(model_path).map_err(|error| error.to_string())
 }
 
-fn resolve_collider(mut collider: Collider, scale: Vector3<f32>, id: &str, trimeshes: &TrimeshCache) -> Collider {
-    let ColliderShape::TrimeshFromModel { model_path } = &collider.shape else { return collider };
+fn resolve_collider(mut collider: Collider, scale: Vector3<f32>, id: &str, own_model: Option<&str>, trimeshes: &TrimeshCache) -> Collider {
+    let (model_path, hull) = match &collider.shape {
+        ColliderShape::TrimeshFromModel { model_path } => (model_path.clone(), false),
+        ColliderShape::ConvexHullFromModel { model_path } => (model_path.clone(), true),
+        ColliderShape::ConvexHullFromOwnModel => match own_model {
+            Some(path) => (path.to_owned(), true),
+            None => {
+                eprintln!("node '{id}': a collider from its own model, but it has no Model file");
+                collider.shape = ColliderShape::ConvexHull { points: vec![] };
+                return collider;
+            }
+        },
+        _ => return collider,
+    };
+    let model_path = &model_path;
 
     let loaded = match trimeshes.get(model_path) {
         Some(loaded) => loaded.clone(),
@@ -75,11 +110,11 @@ fn resolve_collider(mut collider: Collider, scale: Vector3<f32>, id: &str, trime
             let vertices = raw_vertices.iter()
                 .map(|v| Vector3::new(v.x * scale.x, v.y * scale.y, v.z * scale.z))
                 .collect();
-            collider.shape = ColliderShape::Trimesh { vertices, indices };
+            collider.shape = if hull { ColliderShape::ConvexHull { points: vertices } } else { ColliderShape::Trimesh { vertices, indices } };
             collider
         },
         Err(error) => {
-            eprintln!("node '{id}': trimesh collider from '{model_path}' couldn't be loaded: {error}");
+            eprintln!("node '{id}': collider from '{model_path}' couldn't be loaded: {error}");
             // Falls back to a real (if wrong) ColliderShape rather than
             // leaving the unresolved TrimeshFromModel in place - the physics
             // thread has no file access to retry this itself, so an empty

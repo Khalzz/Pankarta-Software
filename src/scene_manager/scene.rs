@@ -4,7 +4,6 @@ use sdl2::EventPump;
 
 use crate::app::{App, AppState};
 use crate::physics::physics_resources::PhysicsObjectDef;
-use crate::physics::Physics;
 use crate::rendering::camera::handler::{LookAtTarget, SceneCameras, DEFAULT_CAMERA};
 use crate::rendering::instance_management::InstanceData;
 use crate::scene_manager::node::properties::{
@@ -250,7 +249,7 @@ impl Scene {
             return Ok(changes);
         };
         let has_model = render_bridge::has_drawable(node);
-        let has_physics = node.get_property::<Physics>().is_some();
+        let has_physics = physics_bridge::has_body(node);
         let lens = node.get_property::<CameraLens>().copied();
         let transform = node.transform_3d().copied().unwrap_or_default();
         if node.get_property::<crate::scene_manager::node::properties::Material>().is_some() {
@@ -369,15 +368,10 @@ impl Scene {
             }
         }
         for id in &self.pending_bodies {
-            let Some(physics) = self
-                .content
-                .nodes
-                .get(id)
-                .and_then(|node| node.get_property::<Physics>())
-            else {
+            let Some(node) = self.content.nodes.get(id) else {
                 continue;
             };
-            for path in physics_bridge::trimesh_paths(physics) {
+            for path in physics_bridge::trimesh_paths(node) {
                 if !assets.trimeshes.iter().any(|known| known == path) {
                     assets.trimeshes.push(path.to_owned());
                 }
@@ -589,7 +583,7 @@ impl Scene {
     fn note_set_up_in_on_spawn(&mut self, id: &str) {
         let Some(node) = self.content.nodes.get(id) else { return };
         let has_model = render_bridge::has_drawable(node);
-        let has_physics = node.get_property::<Physics>().is_some();
+        let has_physics = physics_bridge::has_body(node);
         let lens = node.get_property::<CameraLens>().copied();
         let transform = node.transform_3d().copied().unwrap_or_default();
         if has_model && !self.content.renderizable_instances.values().any(|instance| instance.node == id) && !self.pending_models.iter().any(|pending| pending == id) {

@@ -91,13 +91,56 @@ pub struct PhysicsObjectDef {
     pub position: Vector3<f32>,
     pub rotation: UnitQuaternion<f32>,
     pub physics: body::Physics,
+    /// Its node's `Layers` - what sensors see it as.
+    pub layers: Vec<String>,
+    /// A body that follows its node's `Transform3D` instead of moving on
+    /// its own - a node with a `Sensor` and no `Physics`.
+    pub follows_node: bool,
+}
+
+/// The bit each layer name (see `body::Layers`) got, in the order they were
+/// first seen - bit 0 is every node without layers.
+#[derive(Default)]
+pub(crate) struct LayerBits {
+    names: Vec<String>,
+}
+
+impl LayerBits {
+    fn bits(&mut self, names: &[String]) -> Group {
+        let mut bits = Group::empty();
+        for name in names {
+            let index = match self.names.iter().position(|known| known == name) {
+                Some(index) => index,
+                None if self.names.len() < 31 => {
+                    self.names.push(name.clone());
+                    self.names.len() - 1
+                }
+                None => {
+                    eprintln!("physics: layer '{name}' left out - 31 layers at most");
+                    continue;
+                }
+            };
+            bits |= Group::from_bits_truncate(1 << (index + 1));
+        }
+        bits
+    }
+
+    /// A collider's groups: it's in its node's `layers` (bit 0 without
+    /// any); a sensor sees only what it `detects`, anything else everything.
+    fn groups(&mut self, layers: &[String], collider: &body::Collider) -> InteractionGroups {
+        let memberships = if layers.is_empty() { Group::GROUP_1 } else { self.bits(layers) };
+        let filter = if collider.sensor && !collider.detects.is_empty() { self.bits(&collider.detects) } else { Group::ALL };
+        InteractionGroups::new(memberships, filter)
+    }
 }
 
 /// Seeds `collider_set`/`rigidbody_set` from the scene's `PhysicsObjectDef`s
 /// (see that type's own doc comment) - one body each, with its colliders.
-pub fn load_physics_from_definitions(defs: &[PhysicsObjectDef], collider_set: &mut ColliderSet, rigidbody_set: &mut RigidBodySet, physics_handlers: &mut HashMap<String, Option<PhysicsData>>) {
+pub(crate) fn load_physics_from_definitions(defs: &[PhysicsObjectDef], collider_set: &mut ColliderSet, rigidbody_set: &mut RigidBodySet, physics_handlers: &mut HashMap<String, Option<PhysicsData>>, layers: &mut LayerBits) {
     for def in defs {
-        let mut rigid_body = if def.physics.rigidbody.is_static {
+        let mut rigid_body = if def.follows_node {
+            RigidBodyBuilder::kinematic_position_based().translation(def.position).build()
+        } else if def.physics.rigidbody.is_static {
             RigidBodyBuilder::fixed()
                 .additional_mass(def.physics.rigidbody.mass)
                 .translation(vector![def.position.x, def.position.y, def.position.z])
@@ -130,7 +173,13 @@ pub fn load_physics_from_definitions(defs: &[PhysicsObjectDef], collider_set: &m
             let Some(builder) = collider_builder(&collider_data.shape, &def.id) else { continue };
             let mut builder = builder
                 .translation(collider_data.offset)
-                .sensor(collider_data.sensor);
+                .sensor(collider_data.sensor)
+                .collision_groups(layers.groups(&def.layers, collider_data));
+            // Also sees bodies an animation holds still - static ones it
+            // doesn't, or every zone on the ground would detect the ground.
+            if collider_data.sensor {
+                builder = builder.active_collision_types(ActiveCollisionTypes::default() | ActiveCollisionTypes::KINEMATIC_KINEMATIC);
+            }
             // The lower friction and the higher bounce of two touching
             // colliders win - so a 0 friction always slides, whatever it's on.
             if let Some(friction) = collider_data.friction {
@@ -153,6 +202,8 @@ fn collider_builder(shape: &body::ColliderShape, id: &str) -> Option<ColliderBui
     use body::ColliderShape;
     match shape {
         ColliderShape::Cuboid { half_extents } => Some(ColliderBuilder::cuboid(half_extents.0, half_extents.1, half_extents.2)),
+        ColliderShape::Ball { radius } => Some(ColliderBuilder::ball(*radius)),
+        ColliderShape::Cylinder { half_height, radius } => Some(ColliderBuilder::cylinder(*half_height, *radius)),
         ColliderShape::Capsule { half_height, radius } => Some(ColliderBuilder::capsule_y(*half_height, *radius)),
         ColliderShape::HalfSpace { normal } => Some(ColliderBuilder::halfspace(Unit::new_normalize(*normal))),
         ColliderShape::ConvexHull { points } => {
@@ -169,6 +220,15 @@ fn collider_builder(shape: &body::ColliderShape, id: &str) -> Option<ColliderBui
                 .map_err(|error| eprintln!("trimesh collider for '{id}' couldn't be built: {error}"))
                 .ok()
         }
-        _ => None,
+        ColliderShape::HeightField { .. } => {
+            eprintln!("height field collider for '{id}' isn't supported yet - left out");
+            None
+        }
+        // Resolved into a real shape when the node spawns (see
+        // scene_manager::physics_bridge) - one still here never was.
+        ColliderShape::TrimeshFromModel { .. } | ColliderShape::ConvexHullFromModel { .. } | ColliderShape::ConvexHullFromOwnModel => {
+            eprintln!("collider for '{id}' read from a model wasn't loaded - left out");
+            None
+        }
     }
 }

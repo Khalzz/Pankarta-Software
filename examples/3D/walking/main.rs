@@ -4,6 +4,7 @@ use pankarta_software::prelude::*;
 pub mod player;
 pub mod scene;
 pub mod sign;
+pub mod zone;
 
 #[tokio::main]
 async fn main() {
@@ -28,6 +29,9 @@ async fn main() {
     app.renderer.set_vsync(false);
 
     app.renderer.set_ambient_light([0.8, 0.8, 0.8]);
+
+    // Shows the sensors' areas (see zone.rs) - green while the player's in one.
+    app.renderer.debug.sensors = true;
 
     // The game's default controls, shipped with it - then where the player's
     // own rebinds are kept, in their user folder (writable wherever the game

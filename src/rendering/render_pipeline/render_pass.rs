@@ -729,7 +729,7 @@ impl App {
         // The game's lines (and the physics debug view's), under the UI.
         if lines {
             let Renderer { line_renderer, lines, debug, device, queue, light, camera_resources, .. } = &mut self.renderer;
-            let physics: &Lines = if debug.physics { self.physics.lines() } else { &Lines::default() };
+            let physics: &Lines = if debug.physics || debug.sensors { self.physics.lines() } else { &Lines::default() };
             line_renderer.draw(device, queue, &mut render_pass, &light.rendering_data.bind_group, &camera_resources.bind_group, &[lines, physics]);
         }
 

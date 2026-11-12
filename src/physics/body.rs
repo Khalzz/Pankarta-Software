@@ -18,13 +18,16 @@ pub struct Collider {
     pub restitution: Option<f32>,
     /// Detects what overlaps it without stopping anything - a trigger zone.
     pub sensor: bool,
+    /// For a sensor: the layers (see `Layers`) of the nodes it detects -
+    /// empty for every node.
+    pub detects: Vec<String>,
 }
 
 impl Collider {
     /// A collider of `shape` at the body's center, touching things the
     /// default way.
     pub fn new(shape: ColliderShape) -> Self {
-        Self { shape, offset: Vector3::zeros(), friction: None, restitution: None, sensor: false }
+        Self { shape, offset: Vector3::zeros(), friction: None, restitution: None, sensor: false, detects: Vec::new() }
     }
 
     /// Placed `offset` from the body's center (in the body's frame).
@@ -50,6 +53,12 @@ impl Collider {
     /// A trigger: detects overlaps, stops nothing.
     pub fn sensor(mut self) -> Self {
         self.sensor = true;
+        self
+    }
+
+    /// For a sensor: detects only nodes in one of `layers` (see `Layers`).
+    pub fn detects<S: Into<String>>(mut self, layers: impl IntoIterator<Item = S>) -> Self {
+        self.detects = layers.into_iter().map(Into::into).collect();
         self
     }
 }
@@ -88,6 +97,13 @@ pub enum ColliderShape {
     // edges) - a good fit for irregular, concave static terrain (mountains,
     // ...) that no primitive shape approximates well.
     Trimesh { vertices: Vec<Vector3<f32>>, indices: Vec<[u32; 3]> },
+    // The smallest convex shape around a model file's points (its path in
+    // the assets folder) - resolved into a `ConvexHull` at spawn time, scaled
+    // like `TrimeshFromModel`. Solid inside, unlike a trimesh: the shape for
+    // a sensor read from a model, and fine on a moving body too.
+    ConvexHullFromModel { model_path: String },
+    // `ConvexHullFromModel` from the node's own `Model` file.
+    ConvexHullFromOwnModel,
     // The smallest convex shape around `points` (in the body's frame) - a
     // shape that follows an outline more closely than a box, still cheap
     // and stable for a moving body.
@@ -138,3 +154,89 @@ pub struct Physics {
     pub colliders: Vec<Collider>,
 }
 
+
+/// A node's trigger zone - its `Sensor` property: a shape that detects the
+/// nodes with a body overlapping it, and stops nothing. Its node's behaviors
+/// hear about them in `Behavior::on_sensor_enter`/`on_sensor_exit`, and
+/// `app.physics.entered(..)`/`exited(..)`/`inside(..)` tell anyone else.
+///
+/// On a node without `Physics` it follows the node's `Transform3D` - a zone
+/// that stays put, moves with its parent or is moved by hand. On a node with
+/// `Physics` it's one more collider on that body - a pickup radius around a
+/// player.
+///
+/// It detects moving bodies (and ones held still by an animation) - not
+/// static ones (the ground, walls).
+///
+///     Node::new("coin")
+///         .with_property(Transform3D { position, ..Default::default() })
+///         .with_property(Sensor::sphere(1.0).detects(["player"]))
+///         .with_behavior(Coin);
+#[derive(Debug, Clone)]
+pub struct Sensor {
+    pub collider: Collider,
+}
+
+impl Sensor {
+    /// A zone of `shape` - any collider shape.
+    pub fn shape(shape: ColliderShape) -> Self {
+        Self { collider: Collider::new(shape).sensor() }
+    }
+
+    /// A ball of `radius` around the node.
+    pub fn sphere(radius: f32) -> Self {
+        Self::shape(ColliderShape::Ball { radius })
+    }
+
+    /// A box reaching `half_extents` from the node each way.
+    pub fn cuboid(half_extents: Vector3<f32>) -> Self {
+        Self::shape(ColliderShape::Cuboid { half_extents: (half_extents.x, half_extents.y, half_extents.z) })
+    }
+
+    /// A standing capsule (see `ColliderShape::Capsule`).
+    pub fn capsule(half_height: f32, radius: f32) -> Self {
+        Self::shape(ColliderShape::Capsule { half_height, radius })
+    }
+
+    /// A standing cylinder.
+    pub fn cylinder(half_height: f32, radius: f32) -> Self {
+        Self::shape(ColliderShape::Cylinder { half_height, radius })
+    }
+
+    /// The convex shape around the model at `model_path` (in the assets
+    /// folder), scaled like the node - a model's dents are filled in (a zone
+    /// shaped like an L is better made of boxes on child nodes).
+    pub fn from_model(model_path: impl Into<String>) -> Self {
+        Self::shape(ColliderShape::ConvexHullFromModel { model_path: model_path.into() })
+    }
+
+    /// `from_model` with the node's own `Model` file.
+    pub fn from_own_model() -> Self {
+        Self::shape(ColliderShape::ConvexHullFromOwnModel)
+    }
+
+    /// Placed `offset` from the node (in its frame).
+    pub fn offset(mut self, offset: Vector3<f32>) -> Self {
+        self.collider = self.collider.offset(offset);
+        self
+    }
+
+    /// Detects only nodes in one of `layers` (see `Layers`) - every node
+    /// with a body by default.
+    pub fn detects<S: Into<String>>(mut self, layers: impl IntoIterator<Item = S>) -> Self {
+        self.collider = self.collider.detects(layers);
+        self
+    }
+}
+
+/// What a node with a body is, for sensors - its `Layers` property:
+/// `Layers::new(["player"])`, and a `Sensor` that `detects(["player"])`
+/// sees it. A node can be in several. Up to 31 different names a game.
+#[derive(Debug, Clone, Default)]
+pub struct Layers(pub Vec<String>);
+
+impl Layers {
+    pub fn new<S: Into<String>>(layers: impl IntoIterator<Item = S>) -> Self {
+        Self(layers.into_iter().map(Into::into).collect())
+    }
+}

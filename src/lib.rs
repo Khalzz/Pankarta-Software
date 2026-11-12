@@ -44,7 +44,7 @@ pub mod prelude {
     pub use crate::asset_manager::AssetManager;
     pub use crate::input::input::{user_dir, Input};
     pub use crate::input::source::{Axis, Button, InputSource, Key, MouseButton};
-    pub use crate::physics::{Collider, ColliderShape, Physics, RigidBodyData};
+    pub use crate::physics::{Collider, ColliderShape, Layers, Physics, RigidBodyData, Sensor};
     pub use crate::scene_manager::behavior::Behavior;
     pub use crate::scene_manager::node::{Node, NodeLookup, NodeLookupMut};
     pub use crate::scene_manager::node::properties::{
@@ -90,8 +90,8 @@ pub mod physics {
     pub mod physics_resources;
     pub mod world;
 
-    pub use body::{Collider, ColliderShape, Physics, RigidBodyData};
-    pub use world::{PhysicsWorld, RayHit};
+    pub use body::{Collider, ColliderShape, Layers, Physics, RigidBodyData, Sensor};
+    pub use world::{PhysicsWorld, RayHit, SensorChange, SensorEvent};
 }
 
 /// The frame's timing - `app.time`.

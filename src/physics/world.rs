@@ -15,8 +15,12 @@
 //! steps, by how far the frame is toward the next one (see `render_pose`) -
 //! so a body moves smoothly at any frame rate, without ever being drawn
 //! somewhere it hasn't really been.
+//!
+//! Sensors (see `Sensor`) are checked after every step: what started or
+//! stopped overlapping each one is `sensor_events`, and is handed to the
+//! sensor node's behaviors (`Behavior::on_sensor_enter`/`on_sensor_exit`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use nalgebra::{Isometry3, Point3, UnitQuaternion, Vector3};
 use rapier3d::prelude::{
@@ -24,7 +28,7 @@ use rapier3d::prelude::{
     PhysicsPipeline, QueryFilter, QueryPipeline, Ray, RigidBody, RigidBodyHandle, RigidBodySet, RigidBodyType, Shape,
 };
 
-use crate::physics::physics_resources::{load_physics_from_definitions, PhysicsObjectDef};
+use crate::physics::physics_resources::{load_physics_from_definitions, LayerBits, PhysicsObjectDef};
 use crate::rendering::lines::Lines;
 
 /// What a ray hit - see `PhysicsWorld::cast_ray`.
@@ -37,6 +41,24 @@ pub struct RayHit {
     pub point: Vector3<f32>,
     /// The way the surface faces where it was hit.
     pub normal: Vector3<f32>,
+}
+
+/// Whether a node started or stopped overlapping a sensor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SensorChange {
+    Entered,
+    Exited,
+}
+
+/// A node that started or stopped overlapping a sensor in the last step -
+/// see `PhysicsWorld::sensor_events`.
+#[derive(Debug, Clone)]
+pub struct SensorEvent {
+    /// The node with the sensor.
+    pub sensor: String,
+    /// The node it detected.
+    pub other: String,
+    pub change: SensorChange,
 }
 
 /// See the module doc.
@@ -70,7 +92,18 @@ pub struct PhysicsWorld {
     /// Whether the physics debug view is on (`app.renderer.debug.physics`) -
     /// see `debug_lines`.
     debug_view: bool,
+    /// Whether the sensors' debug view is on (`app.renderer.debug.sensors`).
+    sensor_view: bool,
     lines: Lines,
+    /// The bit each layer name got (see `Layers`).
+    layers: LayerBits,
+    /// Every node with a sensor, and the nodes overlapping it as of the
+    /// last step.
+    sensors: HashMap<String, HashSet<String>>,
+    /// What started or stopped overlapping a sensor in the last step.
+    sensor_events: Vec<SensorEvent>,
+    /// Nodes whose body follows their node (a `Sensor` without `Physics`).
+    followers: HashSet<String>,
 }
 
 impl PhysicsWorld {
@@ -100,7 +133,12 @@ impl PhysicsWorld {
             accumulator: 0.0,
             running: false,
             debug_view: false,
+            sensor_view: false,
             lines: Lines::default(),
+            layers: LayerBits::default(),
+            sensors: HashMap::new(),
+            sensor_events: Vec::new(),
+            followers: HashSet::new(),
         }
     }
 
@@ -203,6 +241,9 @@ impl PhysicsWorld {
     /// whatever moves its node moves it (`RigidBody::set_next_kinematic_position`)
     /// - or lets it go again. A static body stays static.
     pub fn set_kinematic(&mut self, id: &str, kinematic: bool) {
+        if self.followers.contains(id) {
+            return;
+        }
         let Some(body) = self.body_mut(id).filter(|body| !body.is_fixed()) else { return };
         let body_type = if kinematic { RigidBodyType::KinematicPositionBased } else { RigidBodyType::Dynamic };
         body.set_body_type(body_type, true);
@@ -217,6 +258,53 @@ impl PhysicsWorld {
     pub fn set_gravity_scale(&mut self, id: &str, scale: f32) {
         if let Some(body) = self.body_mut(id) {
             body.set_gravity_scale(scale, true);
+        }
+    }
+
+    /// What started or stopped overlapping a sensor in the last step - the
+    /// same the sensors' behaviors hear about. Seen by the next step's
+    /// `fixed_update`s; an `update` may see a step's twice or not at all.
+    pub fn sensor_events(&self) -> &[SensorEvent] {
+        &self.sensor_events
+    }
+
+    /// The nodes that started overlapping node `sensor`'s sensor in the
+    /// last step.
+    pub fn entered<'a>(&'a self, sensor: &'a str) -> impl Iterator<Item = &'a str> + 'a {
+        self.changes(sensor, SensorChange::Entered)
+    }
+
+    /// The nodes that stopped overlapping node `sensor`'s sensor in the
+    /// last step - despawned ones too.
+    pub fn exited<'a>(&'a self, sensor: &'a str) -> impl Iterator<Item = &'a str> + 'a {
+        self.changes(sensor, SensorChange::Exited)
+    }
+
+    fn changes<'a>(&'a self, sensor: &'a str, change: SensorChange) -> impl Iterator<Item = &'a str> + 'a {
+        self.sensor_events.iter().filter(move |event| event.sensor == sensor && event.change == change).map(|event| event.other.as_str())
+    }
+
+    /// The nodes overlapping node `sensor`'s sensor, as of the last step.
+    pub fn inside<'a>(&'a self, sensor: &str) -> impl Iterator<Item = &'a str> + 'a {
+        self.sensors.get(sensor).into_iter().flatten().map(String::as_str)
+    }
+
+    /// Whether node `other` overlaps node `sensor`'s sensor, as of the last
+    /// step.
+    pub fn is_inside(&self, sensor: &str, other: &str) -> bool {
+        self.sensors.get(sensor).is_some_and(|inside| inside.contains(other))
+    }
+
+    /// The nodes whose body follows their node - see `follow`.
+    pub(crate) fn followers(&self) -> impl Iterator<Item = &str> {
+        self.followers.iter().map(String::as_str)
+    }
+
+    /// Moves node `id`'s following body (a `Sensor` without `Physics`) to
+    /// where its node is, by the next step.
+    pub(crate) fn follow(&mut self, id: &str, position: Vector3<f32>, rotation: UnitQuaternion<f32>) {
+        if let Some(body) = self.body_mut(id) {
+            body.set_next_kinematic_position(Isometry3::from_parts(position.into(), rotation));
         }
     }
 
@@ -236,8 +324,14 @@ impl PhysicsWorld {
         let id = def.id.clone();
         self.remove_body(&id);
         let mut loaded = HashMap::new();
-        load_physics_from_definitions(std::slice::from_ref(&def), &mut self.colliders, &mut self.bodies, &mut loaded);
+        load_physics_from_definitions(std::slice::from_ref(&def), &mut self.colliders, &mut self.bodies, &mut loaded, &mut self.layers);
         if let Some(Some(data)) = loaded.remove(&id) {
+            if def.physics.colliders.iter().any(|collider| collider.sensor) {
+                self.sensors.insert(id.clone(), HashSet::new());
+            }
+            if def.follows_node {
+                self.followers.insert(id.clone());
+            }
             self.owners.insert(data.rigidbody_handle, id.clone());
             self.handles.insert(id, data.rigidbody_handle);
         }
@@ -246,6 +340,9 @@ impl PhysicsWorld {
     /// Drops node `id`'s body, with its colliders - nothing if it has none.
     pub(crate) fn remove_body(&mut self, id: &str) {
         let Some(handle) = self.handles.remove(id) else { return };
+        // What it overlapped hears it leave after the next step.
+        self.sensors.remove(id);
+        self.followers.remove(id);
         self.owners.remove(&handle);
         self.previous.remove(&handle);
         self.bodies.remove(handle, &mut self.islands, &mut self.colliders, &mut self.impulse_joints, &mut self.multibody_joints, true);
@@ -277,8 +374,9 @@ impl PhysicsWorld {
 
     /// Adds a frame's `elapsed` (scaled) seconds, and says how many steps
     /// are due now.
-    pub(crate) fn steps_due(&mut self, elapsed: f32, debug_view: bool) -> u32 {
+    pub(crate) fn steps_due(&mut self, elapsed: f32, debug_view: bool, sensor_view: bool) -> u32 {
         self.debug_view = debug_view;
+        self.sensor_view = sensor_view;
         self.lines.clear();
         if !self.running {
             return 0;
@@ -313,6 +411,37 @@ impl PhysicsWorld {
             &(),
             &(),
         );
+        self.update_sensors();
+    }
+
+    /// What overlaps each sensor now, against what did before the step -
+    /// the differences into `sensor_events`.
+    fn update_sensors(&mut self) {
+        self.sensor_events.clear();
+        for (id, inside) in self.sensors.iter_mut() {
+            let mut now = HashSet::new();
+            let body = self.handles.get(id).and_then(|handle| self.bodies.get(*handle));
+            for &collider in body.map(|body| body.colliders()).unwrap_or_default() {
+                if !self.colliders.get(collider).is_some_and(|collider| collider.is_sensor() && collider.is_enabled()) {
+                    continue;
+                }
+                for (a, b, overlapping) in self.narrow_phase.intersection_pairs_with(collider) {
+                    let other = if a == collider { b } else { a };
+                    let owner = self.colliders.get(other).and_then(Collider::parent).and_then(|body| self.owners.get(&body));
+                    if let Some(owner) = owner.filter(|owner| overlapping && *owner != id) {
+                        now.insert(owner.clone());
+                    }
+                }
+            }
+            let mut exited: Vec<&String> = inside.difference(&now).collect();
+            let mut entered: Vec<&String> = now.difference(inside).collect();
+            exited.sort();
+            entered.sort();
+            let event = |other: &String, change| SensorEvent { sensor: id.clone(), other: other.clone(), change };
+            self.sensor_events.extend(exited.into_iter().map(|other| event(other, SensorChange::Exited)));
+            self.sensor_events.extend(entered.into_iter().map(|other| event(other, SensorChange::Entered)));
+            *inside = now;
+        }
     }
 
     /// Where `handle`'s body is drawn this frame: between where it was before
@@ -330,25 +459,39 @@ impl PhysicsWorld {
     /// `render_pose`).
     pub(crate) fn render_poses(&self) -> impl Iterator<Item = (&str, Isometry3<f32>)> {
         self.handles.iter().filter_map(|(id, handle)| {
-            let body = self.bodies.get(*handle).filter(|body| !body.is_fixed())?;
+            let body = self.bodies.get(*handle).filter(|body| !body.is_fixed() && !self.followers.contains(id))?;
             Some((id.as_str(), self.render_pose(*handle, body)))
         })
     }
 
     /// Every moving body's colliders, into the debug lines where they're
     /// drawn this frame - static ones (the ground) skipped, they'd bury the
-    /// screen. Only while the debug view is on.
+    /// screen - and every sensor, cyan, green while something overlaps it.
+    /// While the physics debug view is on - or just the sensors, while
+    /// theirs is.
     pub(crate) fn draw_colliders(&mut self) {
-        if !self.debug_view {
+        if !self.debug_view && !self.sensor_view {
             return;
         }
         const COLLIDER_COLOR: [f32; 3] = [1.0, 0.55, 0.1];
+        const SENSOR_COLOR: [f32; 3] = [0.2, 0.8, 1.0];
+        const OCCUPIED_SENSOR_COLOR: [f32; 3] = [0.2, 1.0, 0.3];
         let mut lines = std::mem::take(&mut self.lines);
-        for (handle, body) in self.bodies.iter().filter(|(_, body)| !body.is_fixed()) {
+        for (handle, body) in self.bodies.iter() {
             let pose = self.render_pose(handle, body);
+            let occupied = self.owners.get(&handle).and_then(|id| self.sensors.get(id)).is_some_and(|inside| !inside.is_empty());
             for collider in body.colliders().iter().filter_map(|collider| self.colliders.get(*collider)).filter(|collider| collider.is_enabled()) {
+                let shown = if collider.is_sensor() { self.debug_view || self.sensor_view } else { self.debug_view && !body.is_fixed() };
+                if !shown {
+                    continue;
+                }
                 let local = collider.position_wrt_parent().copied().unwrap_or_else(Isometry3::identity);
-                draw_shape(&mut lines, &(pose * local), collider.shape(), COLLIDER_COLOR);
+                let color = match (collider.is_sensor(), occupied) {
+                    (false, _) => COLLIDER_COLOR,
+                    (true, false) => SENSOR_COLOR,
+                    (true, true) => OCCUPIED_SENSOR_COLOR,
+                };
+                draw_shape(&mut lines, &(pose * local), collider.shape(), color);
             }
         }
         self.lines = lines;
@@ -412,5 +555,87 @@ fn circle(lines: &mut Lines, world: &dyn Fn(Vector3<f32>) -> Vector3<f32>, cente
     };
     for i in 0..SEGMENTS {
         lines.line(point(i), point(i + 1), color);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::physics::{Collider, ColliderShape, Physics, RigidBodyData, Sensor};
+
+    fn def(id: &str, position: Vector3<f32>, physics: Physics, layers: &[&str], follows_node: bool) -> PhysicsObjectDef {
+        PhysicsObjectDef {
+            id: id.to_owned(),
+            position,
+            rotation: UnitQuaternion::identity(),
+            physics,
+            layers: layers.iter().map(|layer| layer.to_string()).collect(),
+            follows_node,
+        }
+    }
+
+    fn ball(id: &str, x: f32, layers: &[&str]) -> PhysicsObjectDef {
+        let physics = Physics { rigidbody: RigidBodyData::dynamic(1.0), colliders: vec![Collider::new(ColliderShape::Ball { radius: 0.25 })] };
+        def(id, Vector3::new(x, 5.0, 0.0), physics, layers, false)
+    }
+
+    fn zone(detects: &[&str]) -> PhysicsObjectDef {
+        let sensor = Sensor::cuboid(Vector3::new(3.0, 1.0, 3.0)).detects(detects.iter().copied());
+        def("zone", Vector3::zeros(), Physics { rigidbody: RigidBodyData::default(), colliders: vec![sensor.collider] }, &[], true)
+    }
+
+    /// Steps until the balls fell through the zone and out the bottom,
+    /// collecting every event.
+    fn run(world: &mut PhysicsWorld) -> Vec<(String, SensorChange)> {
+        let mut seen = Vec::new();
+        for _ in 0..240 {
+            world.step();
+            seen.extend(world.sensor_events().iter().map(|event| (event.other.clone(), event.change)));
+        }
+        seen
+    }
+
+    #[test]
+    fn sensor_sees_layer_enter_and_exit() {
+        let mut world = PhysicsWorld::new();
+        world.start(vec![zone(&["player"]), ball("player", 0.0, &["player"]), ball("rock", 1.0, &[])]);
+        let seen = run(&mut world);
+        assert_eq!(seen, vec![("player".to_owned(), SensorChange::Entered), ("player".to_owned(), SensorChange::Exited)]);
+    }
+
+    #[test]
+    fn sensor_without_detects_sees_everything() {
+        let mut world = PhysicsWorld::new();
+        world.start(vec![zone(&[]), ball("player", 0.0, &["player"]), ball("rock", 1.0, &[])]);
+        let seen = run(&mut world);
+        assert_eq!(seen.iter().filter(|(_, change)| *change == SensorChange::Entered).count(), 2);
+    }
+
+    #[test]
+    fn despawned_body_exits() {
+        let mut world = PhysicsWorld::new();
+        world.start(vec![zone(&[]), ball("rock", 0.0, &[])]);
+        world.teleport("rock", Vector3::zeros(), UnitQuaternion::identity());
+        world.set_gravity(Vector3::zeros());
+        world.step();
+        assert!(world.is_inside("zone", "rock"));
+        world.remove_body("rock");
+        world.step();
+        assert_eq!(world.exited("zone").collect::<Vec<_>>(), vec!["rock"]);
+        assert_eq!(world.inside("zone").count(), 0);
+    }
+
+    #[test]
+    fn follower_moves_with_its_node() {
+        let mut world = PhysicsWorld::new();
+        world.start(vec![zone(&[]), ball("rock", 10.0, &[])]);
+        world.set_gravity(Vector3::zeros());
+        world.teleport("rock", Vector3::new(10.0, 0.0, 0.0), UnitQuaternion::identity());
+        world.step();
+        assert!(!world.is_inside("zone", "rock"));
+        world.follow("zone", Vector3::new(10.0, 0.0, 0.0), UnitQuaternion::identity());
+        world.step();
+        assert!(world.is_inside("zone", "rock"));
+        assert!(world.render_poses().all(|(id, _)| id != "zone"));
     }
 }

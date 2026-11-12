@@ -11,6 +11,7 @@ use pankarta_software::ui::TextStyle;
 
 use crate::player::Player;
 use crate::sign::sign_glass;
+use crate::zone::zone;
 
 pub struct WalkingScene {
     /// Which of AMBIENT_GROUND_LEVELS is in use - H cycles them.
@@ -106,7 +107,10 @@ impl WalkingScene {
         // Walk up behind it and look through it.
         let glass = sign_glass("sign_glass", Vector3::new(3.0, 0.0, -6.0), 0.0);
 
-        let mut nodes = vec![ground, player, plane, sun, glass];
+        // Walk onto it - see zone.rs.
+        let pad = zone("zone", Vector3::new(-4.0, 0.0, -6.0));
+
+        let mut nodes = vec![ground, player, plane, sun, glass, pad];
 
         for index in 0..12 {
             let angle = index as f32 / 12.0 * std::f32::consts::TAU;
@@ -144,6 +148,9 @@ impl WalkingScene {
             UiNode::container()
                 .set_child("framerate", framerate)
                 .set_child("ambient_ground", text(&ambient_ground_text(DEFAULT_AMBIENT_GROUND), &TextStyle::default())
+                    .set_padding((10.0, 4.0))
+                    .set_size(SizeValue::Pixels(500.0), SizeValue::Fit))
+                .set_child("zone", text("", &TextStyle::default())
                     .set_padding((10.0, 4.0))
                     .set_size(SizeValue::Pixels(500.0), SizeValue::Fit)),
         ));
@@ -184,6 +191,10 @@ impl SceneBehaviour for WalkingScene {
             }
             if let Some(label) = ui.label_mut("ambient_ground") {
                 label.set_text(ambient_ground_text(self.ambient_ground));
+            }
+            if let Some(label) = ui.label_mut("zone") {
+                let inside = app.physics.is_inside("zone", "player");
+                label.set_text(if inside { "In the blue zone" } else { "" });
             }
         }
 

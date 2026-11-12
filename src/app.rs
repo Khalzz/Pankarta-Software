@@ -905,7 +905,7 @@ impl App {
     }
 
     fn run_physics(&mut self, scene: &mut Scene) {
-        let steps = self.physics.steps_due(self.time.delta_time, self.renderer.debug.physics);
+        let steps = self.physics.steps_due(self.time.delta_time, self.renderer.debug.physics, self.renderer.debug.sensors);
         for _ in 0..steps {
             self.input.begin_fixed_step();
             let mut changes = SceneChanges::default();
@@ -917,7 +917,21 @@ impl App {
             if self.origin.has_pending() {
                 self.update_origin(scene, false);
             }
+            // Sensors without a body of their own go where their node is.
+            let followed: Vec<(String, crate::scene_manager::node::properties::Transform3D)> = self.physics.followers()
+                .filter_map(|id| Some((id.to_owned(), scene.world_transform(id)?)))
+                .collect();
+            for (id, world) in followed {
+                self.physics.follow(&id, world.position, world.rotation);
+            }
             self.physics.step();
+            // What the step's sensors detected, to their behaviors.
+            let events = self.physics.sensor_events().to_vec();
+            if !events.is_empty() {
+                let mut changes = SceneChanges::default();
+                scene.content.nodes.sensor_events(&events, &mut scene.cameras, self, &mut changes);
+                scene.apply_changes(self, changes);
+            }
         }
 
         // Not onto a node an animation is moving (SceneContent::kinematic) -

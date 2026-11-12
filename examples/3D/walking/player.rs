@@ -65,6 +65,8 @@ impl Behavior for Player {
             position: self.movement.spawn,
             ..Default::default()
         });
+        // What sensors see it as (see zone.rs).
+        node.set_property(Layers::new(["player"]));
         node.set_property(Physics {
             rigidbody: RigidBodyData {
                 lock_rotations: true,

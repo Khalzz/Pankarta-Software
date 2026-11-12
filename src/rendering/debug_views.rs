@@ -1,6 +1,7 @@
 //! The engine's debug views - `app.renderer.debug`, each off by default:
 //!
 //!     app.renderer.debug.physics = true;   // collider shapes, and what physics behaviors draw
+//!     app.renderer.debug.sensors = true;   // just the sensors' areas - green with something inside
 //!     app.renderer.debug.wireframe = true; // every model's edges
 //!     app.renderer.debug.depth = true;     // the depth buffer, near dark to far light
 //!     app.renderer.debug.shadows = true;   // the sun's shadow maps, nearest first, bottom left
@@ -19,6 +20,9 @@ use crate::rendering::models::textures::Texture;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DebugViews {
     pub physics: bool,
+    /// Every sensor's area (see `Sensor`) - cyan while it's empty, green
+    /// while something overlaps it. Also part of `physics`.
+    pub sensors: bool,
     pub wireframe: bool,
     pub depth: bool,
     pub shadows: bool,

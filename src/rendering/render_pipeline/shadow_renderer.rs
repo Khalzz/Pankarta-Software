@@ -86,6 +86,12 @@ const CACHE_STEPS: f32 = 4.0;
 /// in it.
 const CASTER_REACH: f32 = 200.0;
 
+/// How far away from the sun (world units) past a box its map covers - so
+/// the ground under a camera that's higher than the nearest box is half
+/// tall is still in that sharp map, instead of the map ending a step or so
+/// below the camera (where the shaders hand over to the next one).
+const RECEIVER_REACH: f32 = 10.0;
+
 /// Maps OpenGL's [-1, 1] NDC z-range to wgpu's [0, 1] - not reversed, unlike
 /// the camera's (see projection::OPENGL_TO_WGPU_MATRIX): an orthographic
 /// depth is spread evenly, so there's no precision to win back by reversing.
@@ -213,8 +219,8 @@ pub(crate) fn create_shadow_pipeline(device: &wgpu::Device, label: &str, layout:
             depth_compare: wgpu::CompareFunction::Less,
             stencil: wgpu::StencilState::default(),
             // The clamp is in depth (0..1 across the map's box, which runs
-            // CASTER_REACH plus the box's own size along the sun - 200 to
-            // ~600 m): about 1 to 3 cm.
+            // CASTER_REACH and RECEIVER_REACH plus the box's own size along
+            // the sun - 210 to ~610 m): about 1 to 3 cm.
             bias: wgpu::DepthBiasState { constant: 1, slope_scale: 2.0, clamp: SHADOW_BIAS_CLAMP },
         }),
         multisample: wgpu::MultisampleState::default(),
@@ -413,8 +419,8 @@ impl ShadowRender {
             let grid = across.map(|along| (along / step).round());
             let centre = grid * step - across;
             // Looking down -z: from CASTER_REACH past the box toward the
-            // sun to the far side of the box.
-            let projection = Orthographic3::new(centre.x - half, centre.x + half, centre.y - half, centre.y + half, -(centre.z + half + CASTER_REACH), half - centre.z);
+            // sun to RECEIVER_REACH past its far side.
+            let projection = Orthographic3::new(centre.x - half, centre.x + half, centre.y - half, centre.y + half, -(centre.z + half + CASTER_REACH), half + RECEIVER_REACH - centre.z);
             let view_proj = OPENGL_TO_WGPU_DEPTH * projection.to_homogeneous() * view;
             let raw: [[f32; 4]; 4] = view_proj.into();
             // The sun looks down its view's -z.

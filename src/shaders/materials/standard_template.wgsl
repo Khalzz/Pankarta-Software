@@ -195,8 +195,9 @@ fn cascade_shadow(position: vec3<f32>, normal: vec3<f32>, cascade: i32) -> vec2<
     let spread_world = max(light.shadow_params.z * texel_world, light.shadow_params.w);
     let spread_texels = spread_world / texel_world;
     let spread = spread_texels * texel_uv;
-    // Far enough inside the map that every texel read is in it.
-    let margin = spread + texel_uv;
+    // Far enough inside the map that every texel read is in it (the disc's
+    // farthest read is 1.23 spreads out).
+    let margin = spread * 1.25 + texel_uv;
 
     // Kept from shading itself (acne - stripes, rings and speckles where the
     // map's depth and the surface's swap back and forth), without moving it
@@ -237,6 +238,12 @@ fn cascade_shadow(position: vec3<f32>, normal: vec3<f32>, cascade: i32) -> vec2<
     // that is, from a step toward the sun.
     let depth_per_meter = abs((view_proj * vec4<f32>(lifted + sun, 1.0)).z - clip.z);
     let max_tilt = depth_per_meter * (spread_world + texel_world) * 4.0;
+    // Past the map's far side (away from the sun) nothing was drawn - a read
+    // compared deeper than that is taken for shadow. So the point has to be
+    // in by more than any read's depth strays from it.
+    if (clip.z + max_tilt >= 1.0) {
+        return vec2<f32>(1.0, -1.0);
+    }
 
     // Each read already blends the 2x2 texels around it (the sampler is
     // filtered) - so up to 1.5 texels, 4 reads half a spread apart cover
@@ -265,7 +272,12 @@ fn cascade_shadow(position: vec3<f32>, normal: vec3<f32>, cascade: i32) -> vec2<
         lit += shadow_read(uv, vec2<f32>(half_spread, half_spread), clip.z, tilt, max_tilt, cascade);
         lit /= 4.0;
     }
-    let edge = max(abs(uv.x - 0.5), abs(uv.y - 0.5)) * 2.0;
+    // Near its far side too, as near its sides: 0.2 of its half-size (in
+    // meters) from it is as far into the fade as 0.2 from a side - or the
+    // next cascade takes over there in one hard line.
+    let half_world = 0.5 * texel_world / texel_uv;
+    let far_room = (1.0 - clip.z) / max(depth_per_meter, 1e-12);
+    let edge = max(max(abs(uv.x - 0.5), abs(uv.y - 0.5)) * 2.0, 1.0 - far_room / half_world);
     return vec2<f32>(lit, edge);
 }
 

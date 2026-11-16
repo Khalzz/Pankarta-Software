@@ -19,10 +19,9 @@ pub enum MeshShape {
     /// Standing along Y, with `sides` flat sides - like Blender's cylinder
     /// (its Vertices).
     CylinderShape { radius: f32, height: f32, sides: u32 },
-    /// Standing along Y, `bottom` across its bottom and `top` across its
-    /// top (radii), with `sides` flat sides - like Blender's cone (its
-    /// Radius 1, Radius 2, Depth and Vertices).
-    ConeShape { bottom: f32, top: f32, height: f32, sides: u32 },
+    /// Turned around Y: `rings` are (height, radius) from bottom to top,
+    /// with `sides` flat sides - see `Mesh::profile_shape`.
+    ProfileShape { rings: Vec<(f32, f32)>, sides: u32 },
     /// Standing along Y, `height` from tip to tip.
     Capsule { radius: f32, height: f32 },
     /// One the game added with `app.assets.add_mesh(name, ..)`.
@@ -74,14 +73,31 @@ impl Mesh {
         Self::new(MeshShape::CylinderShape { radius, height, sides: sides.max(3) })
     }
 
-    /// A cone with `sides` flat sides (3 or more), standing along Y, its
-    /// bottom `bottom` in radius and its top `top` - like Blender's cone:
-    /// Radius 1 `bottom`, Radius 2 `top`, Depth `height`, Vertices `sides`.
-    /// A `top` (or `bottom`) of 0 is pointed; the same two radii make a
-    /// cylinder, a narrower top a tapered one (a bucket, a lampshade).
+    /// A shape turned around Y with `sides` flat sides (3 or more), drawn
+    /// ring by ring with `.ring(height, radius)` from bottom to top - like
+    /// a Blender cylinder with loop cuts, each loop moved and scaled:
+    ///
+    ///     // A vase: wide base, narrow waist, flared lip.
+    ///     Mesh::profile_shape(24).ring(0.0, 0.3).ring(0.4, 0.35).ring(0.8, 0.15).ring(1.1, 0.25)
+    ///     // A traffic cone: a thin base plate, then a point.
+    ///     Mesh::profile_shape(16).ring(0.0, 0.4).ring(0.05, 0.4).ring(0.05, 0.3).ring(0.8, 0.0)
+    ///
+    /// Heights are from the node (0 is where it stands). A radius of 0 is a
+    /// point; two rings at one height make a flat step. The first and last
+    /// rings are capped flat unless they're points. Needs 2 rings or more.
     /// Drawn with flat faces; `Collider::from_mesh` collides with exactly it.
-    pub fn cone_shape(bottom: f32, top: f32, height: f32, sides: u32) -> Self {
-        Self::new(MeshShape::ConeShape { bottom: bottom.max(0.0), top: top.max(0.0), height, sides: sides.max(3) })
+    pub fn profile_shape(sides: u32) -> Self {
+        Self::new(MeshShape::ProfileShape { rings: Vec::new(), sides: sides.max(3) })
+    }
+
+    /// The next ring of a `profile_shape`, above the one before it: at
+    /// `height`, `radius` from the middle (0 or more).
+    pub fn ring(mut self, height: f32, radius: f32) -> Self {
+        match &mut self.shape {
+            MeshShape::ProfileShape { rings, .. } => rings.push((height, radius.max(0.0))),
+            other => eprintln!("Mesh::ring is for Mesh::profile_shape - a {other:?} has no rings; ignored"),
+        }
+        self
     }
 
     pub fn capsule(radius: f32, height: f32) -> Self {
@@ -128,7 +144,7 @@ impl Mesh {
             MeshShape::Cylinder { radius, height } => (ModelSource::Cylinder, Vector3::new(radius * 2.0, *height, radius * 2.0)),
             MeshShape::CylinderShape { radius, height, sides } => (ModelSource::CylinderShape { sides: *sides }, Vector3::new(radius * 2.0, *height, radius * 2.0)),
             MeshShape::Capsule { radius, height } => (ModelSource::Capsule { radius: *radius, height: *height }, one),
-            MeshShape::ConeShape { bottom, top, height, sides } => (ModelSource::ConeShape { bottom: *bottom, top: *top, height: *height, sides: *sides }, one),
+            MeshShape::ProfileShape { rings, sides } => (ModelSource::ProfileShape { rings: rings.clone(), sides: *sides }, one),
             MeshShape::Custom(name) => (ModelSource::Mesh(name.clone()), one),
         }
     }

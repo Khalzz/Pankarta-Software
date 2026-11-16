@@ -189,40 +189,56 @@ pub(crate) fn build_cylinder_shape_mesh(sides: u32) -> (Vec<ModelVertex>, Vec<u3
     (vertices, indices)
 }
 
-/// A cone `height` tall, centered, standing along Y, `bottom` in radius at
-/// its bottom and `top` at its top, with `sides` flat sides - each its own
-/// flat normal, leaning out as the side does (as Blender draws its cone),
-/// and a flat cap on each end that isn't a point. Its corners are at angles
-/// 0, 1/sides, 2/sides... of a turn.
-pub(crate) fn build_cone_shape_mesh(bottom: f32, top: f32, height: f32, sides: u32) -> (Vec<ModelVertex>, Vec<u32>) {
+/// A shape turned around Y through `rings` - (height, radius), bottom to
+/// top - with `sides` flat sides. Each band between two rings is its own
+/// flat faces, lit leaning as the band does (out, up where it narrows, down
+/// where it widens, straight up on a step); the first ring is capped facing
+/// down and the last facing up, unless they're points. Corners are at angles
+/// 0, 1/sides, 2/sides... of a turn; heights are as given, not centered.
+pub(crate) fn build_profile_shape_mesh(rings: &[(f32, f32)], sides: u32) -> (Vec<ModelVertex>, Vec<u32>) {
     let sides = sides.max(3);
-    let half = height / 2.0;
     let at = |side: u32| (side as f32 / sides as f32 * std::f32::consts::TAU).sin_cos();
+    // How far along the outline each ring is, for the texture's v.
+    let mut along = vec![0.0];
+    for pair in rings.windows(2) {
+        let ((y0, r0), (y1, r1)) = (pair[0], pair[1]);
+        along.push(along.last().unwrap() + ((y1 - y0).powi(2) + (r1 - r0).powi(2)).sqrt());
+    }
+    let length = along.last().copied().unwrap_or(0.0).max(1e-6);
     let (mut vertices, mut indices) = (Vec::new(), Vec::new());
-    for side in 0..sides {
-        let ((s0, c0), (s1, c1)) = (at(side), at(side + 1));
-        // Out of the side's middle, tipped up as much as the side narrows.
-        let (sin, cos) = ((side as f32 + 0.5) / sides as f32 * std::f32::consts::TAU).sin_cos();
-        let lean = (bottom - top) * (std::f32::consts::PI / sides as f32).cos();
-        let n = Vector3::new(cos * height, lean, sin * height).try_normalize(1e-6).unwrap_or_else(Vector3::y);
-        let normal = [n.x, n.y, n.z];
-        let (u0, u1) = (side as f32 / sides as f32, (side + 1) as f32 / sides as f32);
-        let base = vertices.len() as u32;
-        vertices.push(ModelVertex { position: [c0 * top, half, s0 * top], tex_coords: [u0, 0.0], normal });
-        vertices.push(ModelVertex { position: [c0 * bottom, -half, s0 * bottom], tex_coords: [u0, 1.0], normal });
-        vertices.push(ModelVertex { position: [c1 * bottom, -half, s1 * bottom], tex_coords: [u1, 1.0], normal });
-        vertices.push(ModelVertex { position: [c1 * top, half, s1 * top], tex_coords: [u1, 0.0], normal });
-        // Counter-clockwise seen from outside; a pointed end's triangle has
-        // no area, so it's left out.
-        if top > 0.0 {
-            indices.extend_from_slice(&[base, base + 3, base + 2]);
+    for (band, pair) in rings.windows(2).enumerate() {
+        let ((y0, r0), (y1, r1)) = (pair[0], pair[1]);
+        if r0 <= 0.0 && r1 <= 0.0 || (y0 == y1 && r0 == r1) {
+            continue; // No area: along the middle, or the same ring twice.
         }
-        if bottom > 0.0 {
-            indices.extend_from_slice(&[base, base + 2, base + 1]);
+        let (v0, v1) = (1.0 - along[band] / length, 1.0 - along[band + 1] / length);
+        for side in 0..sides {
+            let ((s0, c0), (s1, c1)) = (at(side), at(side + 1));
+            // Out of the face's middle (r cos(pi/sides) from the axis),
+            // turned as the band runs from ring to ring.
+            let (sin, cos) = ((side as f32 + 0.5) / sides as f32 * std::f32::consts::TAU).sin_cos();
+            let lean = (r0 - r1) * (std::f32::consts::PI / sides as f32).cos();
+            let n = Vector3::new(cos * (y1 - y0), lean, sin * (y1 - y0)).try_normalize(1e-9).unwrap_or_else(Vector3::y);
+            let normal = [n.x, n.y, n.z];
+            let (u0, u1) = (side as f32 / sides as f32, (side + 1) as f32 / sides as f32);
+            let base = vertices.len() as u32;
+            vertices.push(ModelVertex { position: [c0 * r1, y1, s0 * r1], tex_coords: [u0, v1], normal });
+            vertices.push(ModelVertex { position: [c0 * r0, y0, s0 * r0], tex_coords: [u0, v0], normal });
+            vertices.push(ModelVertex { position: [c1 * r0, y0, s1 * r0], tex_coords: [u1, v0], normal });
+            vertices.push(ModelVertex { position: [c1 * r1, y1, s1 * r1], tex_coords: [u1, v1], normal });
+            // Counter-clockwise seen from outside; a pointed ring's
+            // triangle has no area, so it's left out.
+            if r1 > 0.0 {
+                indices.extend_from_slice(&[base, base + 3, base + 2]);
+            }
+            if r0 > 0.0 {
+                indices.extend_from_slice(&[base, base + 2, base + 1]);
+            }
         }
     }
-    for (y, radius, up) in [(half, top, true), (-half, bottom, false)] {
-        if radius <= 0.0 {
+    let ends = [rings.first().map(|&(y, r)| (y, r, false)), rings.last().map(|&(y, r)| (y, r, true))];
+    for (y, radius, up) in ends.into_iter().flatten() {
+        if radius <= 0.0 || rings.len() < 2 {
             continue;
         }
         let normal = [0.0, if up { 1.0 } else { -1.0 }, 0.0];
@@ -269,7 +285,7 @@ pub(crate) fn collision_geometry(source: &ModelSource, custom: &HashMap<String, 
         ModelSource::Cylinder => build_cylinder_mesh(),
         ModelSource::CylinderShape { sides } => build_cylinder_shape_mesh(*sides),
         ModelSource::Capsule { radius, height } => build_capsule_mesh(*radius, *height),
-        ModelSource::ConeShape { bottom, top, height, sides } => build_cone_shape_mesh(*bottom, *top, *height, *sides),
+        ModelSource::ProfileShape { rings, sides } => build_profile_shape_mesh(rings, *sides),
         ModelSource::Mesh(name) => {
             let mesh = custom.get(name)?;
             (mesh.vertices.clone(), mesh.indices.clone())
@@ -407,26 +423,42 @@ mod tests {
         assert!(!triangles.is_empty());
         assert!(collision_geometry(&ModelSource::Mesh("never added".to_owned()), &custom).is_none());
         // A pointed cone: its corners around the bottom, and the tip.
-        let (points, _) = collision_geometry(&ModelSource::ConeShape { bottom: 1.0, top: 0.0, height: 2.0, sides: 10 }, &custom).unwrap();
+        let (points, _) = collision_geometry(&ModelSource::ProfileShape { rings: vec![(0.0, 1.0), (2.0, 0.0)], sides: 10 }, &custom).unwrap();
         let hull = rapier3d::prelude::SharedShape::convex_hull(&points.iter().map(|point| nalgebra::Point3::from(*point)).collect::<Vec<_>>()).unwrap();
         assert_eq!(hull.as_convex_polyhedron().unwrap().points().len(), 11);
         assert!(collision_geometry(&ModelSource::File("a.glb".to_owned()), &custom).is_none());
     }
 
     #[test]
-    fn a_cone_shape_narrows_to_its_top_and_lights_its_sides_leaning() {
-        let (vertices, indices) = build_cone_shape_mesh(1.0, 0.5, 2.0, 8);
+    fn a_profile_shape_follows_its_rings_and_lights_each_band_leaning() {
+        // A tapered cup: two rings, both capped.
+        let (vertices, indices) = build_profile_shape_mesh(&[(0.0, 1.0), (2.0, 0.5)], 8);
         // 4 a side, plus a middle and 8 corners for each cap.
         assert_eq!(vertices.len(), 8 * 4 + 2 * 9);
         assert_eq!(indices.len(), 8 * 6 + 2 * 8 * 3);
         let radius = |v: &ModelVertex| (v.position[0].powi(2) + v.position[2].powi(2)).sqrt();
-        assert!(vertices.iter().filter(|v| v.position[1] > 0.0 && radius(v) > 0.0).all(|v| (radius(v) - 0.5).abs() < 1e-5));
-        assert!(vertices.iter().filter(|v| v.position[1] < 0.0 && radius(v) > 0.0).all(|v| (radius(v) - 1.0).abs() < 1e-5));
+        assert!(vertices.iter().filter(|v| v.position[1] > 1.0 && radius(v) > 0.0).all(|v| (radius(v) - 0.5).abs() < 1e-5));
+        assert!(vertices.iter().filter(|v| v.position[1] < 1.0 && radius(v) > 0.0).all(|v| (radius(v) - 1.0).abs() < 1e-5));
         // Narrower on top: the sides face a little up.
         assert!(vertices[0].normal[1] > 0.0);
-        // Pointed: no top cap, one triangle a side.
-        let (vertices, indices) = build_cone_shape_mesh(1.0, 0.0, 2.0, 8);
+
+        // Pointed at the top: no top cap, one triangle a side.
+        let (vertices, indices) = build_profile_shape_mesh(&[(0.0, 1.0), (2.0, 0.0)], 8);
         assert_eq!(vertices.len(), 8 * 4 + 9);
         assert_eq!(indices.len(), 8 * 3 + 8 * 3);
+
+        // A waist: the lower band narrows, so it faces up and out;
+        // the upper band widens - down and out; a step faces straight up.
+        let (vertices, _) = build_profile_shape_mesh(&[(0.0, 1.0), (1.0, 0.5), (2.0, 1.0), (2.0, 0.6), (3.0, 0.6)], 8);
+        let band = |index: usize| vertices[index * 8 * 4].normal;
+        assert!(band(0)[1] > 0.0 && band(0)[0] > 0.0);
+        assert!(band(1)[1] < 0.0 && band(1)[0] > 0.0);
+        assert!((band(2)[1] - 1.0).abs() < 1e-5);
+        assert!(band(3)[1].abs() < 1e-5);
+        // Its middle ring really is narrower.
+        assert!(vertices.iter().filter(|v| (v.position[1] - 1.0).abs() < 1e-5).all(|v| (radius(v) - 0.5).abs() < 1e-5));
+
+        // Nothing to turn with fewer than two rings.
+        assert!(build_profile_shape_mesh(&[(0.0, 1.0)], 8).0.is_empty());
     }
 }

@@ -80,7 +80,8 @@ impl AssetManager {
                 .ok_or_else(|| format!("there's no mesh '{name}' - add it with app.assets.add_mesh")),
             ModelSource::Cube => Ok(ModelLoad::cube(key, double_sided)),
             ModelSource::Plane { subdivisions } => Ok(ModelLoad::plane(key, *subdivisions, double_sided)),
-            ModelSource::Sphere | ModelSource::Cylinder | ModelSource::CylinderShape { .. } | ModelSource::ConeShape { .. } | ModelSource::Capsule { .. } => Ok(ModelLoad::shape(key, source, double_sided)),
+            ModelSource::ProfileShape { rings, .. } if rings.len() < 2 => Err(format!("a Mesh::profile_shape needs 2 rings or more - it has {}", rings.len())),
+            ModelSource::Sphere | ModelSource::Cylinder | ModelSource::CylinderShape { .. } | ModelSource::ProfileShape { .. } | ModelSource::Capsule { .. } => Ok(ModelLoad::shape(key, source, double_sided)),
         }
     }
 }

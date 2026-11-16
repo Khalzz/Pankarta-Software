@@ -27,12 +27,34 @@ Node::new("crate")
 | `Mesh::plane(subdivisions)` | 1 × 1 across X and Z, facing up. `subdivisions` adds vertices for shaders that move them (waves). |
 | `Mesh::sphere(radius)` | |
 | `Mesh::cylinder(radius, height)` | Standing along Y, smooth and round |
-| `Mesh::cone_shape(bottom, top, height, vertices)` | Standing along Y, `bottom` and `top` radii, with `vertices` flat sides - like Blender's cone (Radius 1, Radius 2, Depth, Vertices). A `top` of 0 is pointed; a narrower or wider top, tapered |
 | `Mesh::cylinder_shape(radius, height, vertices)` | Standing along Y, with `vertices` flat sides - like Blender's cylinder (Radius, Depth, Vertices). `Collider::from_mesh` collides with exactly it (see [colliders.md](colliders.md)) |
+| `Mesh::profile_shape(vertices).ring(height, radius)...` | Turned around Y through its rings, bottom to top, with `vertices` flat sides - cones, buckets, vases, bottles, pillars. See below |
 | `Mesh::capsule(radius, height)` | Standing along Y, `height` from tip to tip |
 | `Mesh::custom(name)` | A mesh you added with `app.assets.add_mesh(name, vertices, indices)` |
 
-Sphere and cylinder share one loaded unit shape that's scaled to size, and so does each vertex count of `cylinder_shape`. Each `cone_shape` size gets its own geometry, so its leaning sides are lit right. Each capsule size gets its own geometry, because scaling a capsule would squash its round ends.
+Sphere and cylinder share one loaded unit shape that's scaled to size, and so does each vertex count of `cylinder_shape`. Each `profile_shape` gets its own geometry, so its leaning sides are lit right. Each capsule size gets its own geometry, because scaling a capsule would squash its round ends.
+
+### Profile shapes
+
+`Mesh::profile_shape(vertices)` is like a Blender cylinder with loop cuts, each loop moved up or down and scaled. Each `.ring(height, radius)` adds the next ring above the last:
+
+```rust
+// A traffic cone: a thin base plate, a step in, then up to a point.
+Mesh::profile_shape(16).ring(0.0, 0.4).ring(0.05, 0.4).ring(0.05, 0.3).ring(0.8, 0.0)
+
+// A cone like Blender's (Radius 1 = 1, Radius 2 = 0.5, Depth 2): just two rings.
+Mesh::profile_shape(32).ring(0.0, 1.0).ring(2.0, 0.5)
+
+// A vase: wide base, narrow waist, flared lip.
+Mesh::profile_shape(24).ring(0.0, 0.2).ring(0.1, 0.3).ring(0.45, 0.32).ring(0.8, 0.12).ring(1.0, 0.18)
+```
+
+- **Heights are from the node.** They aren't centered, so a profile starting at 0 stands on its node's position.
+- **A radius of 0 is a point.** Two rings at the same height make a flat step.
+- **Ends:** the first and last rings get flat caps, unless they're points.
+- **At least 2 rings.** With fewer, the mesh isn't loaded and the error says why.
+- **Faces:** each band between two rings is flat-sided, lit as it leans.
+- **Colliding:** `Collider::from_own_mesh` works with it. A profile dented in, like the vase's waist, is filled in by `ConvexHull`; use `ConvexDecomposition` to keep the dent on a moving body, or `Trimesh` on a static one.
 
 ### Settings
 
@@ -172,7 +194,7 @@ All examples were moved over.
 - `src/scene_manager/node/properties/mesh.rs`: `Mesh`, `MeshShape`.
 - `src/scene_manager/node/properties/model.rs`: `Model`.
 - `src/scene_manager/render_bridge.rs`: `draws(node)`, the list of instances a node draws. Spawning, the per-frame sync (adding and removing parts), material setup, scene loading and colliders all read that one list.
-- `src/asset_manager/primitives.rs`: sphere, cylinder, `cylinder_shape`, `cone_shape` and capsule geometry.
+- `src/asset_manager/primitives.rs`: sphere, cylinder, `cylinder_shape`, `profile_shape` and capsule geometry.
 - `src/shaders/materials/colored.wgsl`: engine/colored. `tiled.wgsl` has the new `color` parameter.
 
 ---

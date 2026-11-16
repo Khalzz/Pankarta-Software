@@ -158,30 +158,58 @@ impl WalkingScene {
                 .add(Collider::from_model(&stool_model, Meshes::all().each(), ModelShape::ConvexHull).mass(1.5)))
             .with_property(stool_model);
 
-        // Cones like Blender's (Radius 1, Radius 2, Depth, Vertices): a
-        // pointed traffic cone and a tapered bucket, each colliding with
-        // exactly its mesh.
-        let cone = |id: &str, position: Vector3<f32>, mesh: Mesh, mass: f32| {
+        // Profile shapes: each turned around Y through its rings (height,
+        // radius) - like a Blender cylinder with loop cuts moved and scaled.
+        // Heights are from the node, so each stands on the ground at y 0.
+        let profiled = |id: &str, x: f32, mesh: Mesh, shape: ModelShape, mass: f32| {
             Node::new(id)
-                .with_property(Transform3D { position, ..Default::default() })
+                .with_property(Transform3D { position: Vector3::new(x, 0.0, -30.0), ..Default::default() })
                 .with_property(mesh)
                 .with_property(RigidBodyBuilder::dynamic().angular_damping(1.0))
-                .with_property(Colliders::new().add(Collider::from_own_mesh(ModelShape::ConvexHull).mass(mass)))
+                .with_property(Colliders::new().add(Collider::from_own_mesh(shape).mass(mass)))
         };
-        let traffic_cone = cone(
+        // A thin base plate, a step in, then up to a point.
+        let traffic_cone = profiled(
             "traffic_cone",
-            Vector3::new(-5.0, 0.4, -30.0),
-            Mesh::cone_shape(0.3, 0.0, 0.8, 16).material(Material::standard().color(UiColor::Rgb(255, 120, 20))),
+            -5.0,
+            Mesh::profile_shape(16)
+                .ring(0.0, 0.4)
+                .ring(0.05, 0.4)
+                .ring(0.05, 0.3)
+                .ring(0.8, 0.0)
+                .material(Material::standard().color(UiColor::Rgb(255, 120, 20))),
+            ModelShape::ConvexHull,
             3.0,
         );
-        let bucket = cone(
+        // Wider on top, with a rim.
+        let bucket = profiled(
             "bucket",
-            Vector3::new(5.0, 0.3, -30.0),
-            Mesh::cone_shape(0.25, 0.35, 0.6, 20).material(Material::standard().color(UiColor::Rgb(90, 140, 200))),
+            5.0,
+            Mesh::profile_shape(20)
+                .ring(0.0, 0.25)
+                .ring(0.55, 0.35)
+                .ring(0.6, 0.37)
+                .material(Material::standard().color(UiColor::Rgb(90, 140, 200))),
+            ModelShape::ConvexHull,
             2.0,
         );
+        // Dented in at the waist - a convex hull would fill the waist, so
+        // it's cut into convex pieces that keep it.
+        let vase = profiled(
+            "vase",
+            8.0,
+            Mesh::profile_shape(24)
+                .ring(0.0, 0.2)
+                .ring(0.1, 0.3)
+                .ring(0.45, 0.32)
+                .ring(0.8, 0.12)
+                .ring(1.0, 0.18)
+                .material(Material::standard().color(UiColor::Rgb(170, 90, 160))),
+            ModelShape::ConvexDecomposition,
+            4.0,
+        );
 
-        let mut nodes = vec![ground, player, plane, toy_jet, barrel, stool, traffic_cone, bucket, sun, glass];
+        let mut nodes = vec![ground, player, plane, toy_jet, barrel, stool, traffic_cone, bucket, vase, sun, glass];
         // Sensors of every shape, outside the cubes - see sensor_gallery.rs.
         nodes.extend(sensor_gallery());
 

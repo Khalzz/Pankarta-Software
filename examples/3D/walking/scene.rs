@@ -50,8 +50,9 @@ const PLANE_NAME: &str = "plane_name";
 /// How far over the plane's middle its name floats (m).
 const PLANE_NAME_HEIGHT: f32 = 4.0;
 
-fn static_box(size: Vector3<f32>) -> Physics {
-    Physics::fixed().collider(ColliderBuilder::cuboid(size.x / 2.0, size.y / 2.0, size.z / 2.0))
+/// Colliders and no body: it stays put.
+fn static_box(size: Vector3<f32>) -> Colliders {
+    Colliders::new().add(ColliderBuilder::cuboid(size.x / 2.0, size.y / 2.0, size.z / 2.0))
 }
 
 impl WalkingScene {
@@ -73,7 +74,7 @@ impl WalkingScene {
                             .tiled(4.0, TextureSpace::World),
                     ),
             )
-            .with_property(Physics::fixed().collider(ColliderBuilder::halfspace(Vector3::y_axis())));
+            .with_property(Colliders::new().add(ColliderBuilder::halfspace(Vector3::y_axis())));
 
         // A big static jet to walk on: its exact surface, every mesh of the
         // file merged into one triangle mesh - fine for a body that never
@@ -85,7 +86,7 @@ impl WalkingScene {
                 scale: Vector3::new(14.0, 14.0, 14.0),
                 ..Default::default()
             })
-            .with_property(Physics::fixed().collider(Collider::from_model(&f16, Meshes::all(), ModelShape::Trimesh)))
+            .with_property(Colliders::new().add(Collider::from_model(&f16, Meshes::all(), ModelShape::Trimesh)))
             .with_property(f16);
 
         // A small jet that falls and can be pushed around: a moving body
@@ -110,9 +111,11 @@ impl WalkingScene {
                 rotation: UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 0.6),
                 scale: Vector3::new(3.0, 3.0, 3.0),
             })
-            .with_property(Physics::dynamic(40.0).collider(
-                Collider::from_model(&toy_model, toy_parts.each(), ModelShape::ConvexHull).friction(0.8),
-            ))
+            // Each of its 9 parts weighs 5 kg: Rapier works out where its
+            // center of mass is and how it spins from where they are.
+            .with_property(RigidBodyBuilder::dynamic().angular_damping(2.0))
+            .with_property(Colliders::new()
+                .add(Collider::from_model(&toy_model, toy_parts.each(), ModelShape::ConvexHull).mass(5.0).friction(0.8)))
             .with_property(toy_model);
 
         let player = Node::new("player").with_behavior(Player::new(Vector3::new(

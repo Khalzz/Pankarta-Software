@@ -5,7 +5,6 @@ use crate::rendering::camera::handler::SceneCameras;
 
 use nalgebra::{UnitQuaternion, Vector3};
 
-use crate::physics::Physics;
 
 use super::node::Node;
 use super::scene_access::{SceneAccess, SceneChanges};
@@ -158,7 +157,7 @@ impl SceneNodes {
         let mut order: Vec<(usize, String)> = self.nodes.values()
             .filter(|node| {
                 let follows = node.get_property::<Parent>().is_some_and(|parent| parent.space == Space::Local)
-                    && node.get_property::<Physics>().is_none();
+                    && !crate::scene_manager::physics_bridge::moved_by_physics(node);
                 follows || node.get_property::<LookAt>().is_some()
             })
             .map(|node| (self.depth(&node.id), node.id.clone()))
@@ -180,7 +179,7 @@ impl SceneNodes {
                 }
                 continue;
             }
-            let parent = node.get_property::<Parent>().filter(|parent| parent.space == Space::Local && node.get_property::<Physics>().is_none()).cloned();
+            let parent = node.get_property::<Parent>().filter(|parent| parent.space == Space::Local && !crate::scene_manager::physics_bridge::moved_by_physics(node)).cloned();
             let look_at = node.get_property::<LookAt>().map(|look_at| look_at.target.clone());
 
             let mut world = node.transform_3d().copied().unwrap_or_default();

@@ -1,19 +1,25 @@
-# Colliders
+# Bodies and colliders
 
-A node's `Physics` property is a rigid body and its **colliders**: the shapes it touches things with. **Colliders are Rapier's own `ColliderBuilder`.** The engine adds only what Rapier can't do on its own:
+A node's physics is two properties, both **Rapier's**:
+
+- **`RigidBodyBuilder`**: Rapier's rigid body, put on the node as it is.
+- **`Colliders`**: a list of Rapier `ColliderBuilder`s, `Colliders::new().add(..).add(..)`.
+
+Either can be there without the other. The engine adds only what Rapier can't know about:
 
 | Engine part | What it does |
 |---|---|
-| `Physics::dynamic(..)` / `fixed()` / `new(..)` + `.collider(..)` | Puts the body and its colliders on a node |
-| `Collider::from_model` / `from_own_model` | Makes a Rapier collider's shape from a model file's meshes, read with the scene's other assets |
-| `Meshes` | Picks which meshes of the file, merged or `.each()` one collider apiece |
+| Placing the body | The body starts where its node's `Transform3D` is |
+| Kinematic bodies | A `kinematic_position_based` body follows its node every frame |
+| A node with colliders and no body | Gets a fixed body, or one following the node if all its colliders are sensors |
+| `Colliders` + `.detects(..)` / `.debug(..)` | The list, which layers a sensor sees, and how a collider is drawn for debugging |
+| `Collider::from_model` / `from_own_model` + `Meshes` | A collider's shape from a model file's meshes, read with the scene's other assets |
 | `Model::hide_meshes` | Doesn't draw the meshes that are only there for collision |
-| `Sensor` + `.detects(..)` / `.debug(..)` | A trigger zone: who it sees, and how it's drawn for debugging |
-| `physics::shapes` | A few shapes Rapier has no constructor for, as `ColliderBuilder`s |
+| `Collider::hemisphere`, `cylinder_with_sides` | Shapes Rapier has no constructor for |
 
-The prelude has `ColliderBuilder` and `CoefficientCombineRule`. The rest of Rapier is in `pankarta_software::rapier3d`, the engine's own version, so the types always match.
+The prelude has `RigidBodyBuilder`, `ColliderBuilder`, `MassProperties` and `CoefficientCombineRule`. The rest of Rapier is in `pankarta_software::rapier3d`, the engine's own version, so the types always match.
 
-The full example is the walking scene: `cargo run --example walking`.
+The full examples: `cargo run --example walking` (player, model colliders, trigger zones) and `cargo run --example water` (floating crates).
 
 ---
 
@@ -22,41 +28,47 @@ The full example is the walking scene: `cargo run --example walking`.
 ```rust
 use pankarta_software::prelude::*;
 
-// A crate: a 1 x 1 x 1 box (half its size each way).
+// A crate: a 1 x 1 x 1 box (half its size each way) weighing 20 kg.
 Node::new("crate")
     .with_property(Transform3D { position: Vector3::new(0.0, 2.0, 0.0), ..Default::default() })
-    .with_property(Physics::dynamic(5.0)
-        .collider(ColliderBuilder::cuboid(0.5, 0.5, 0.5).friction(0.7).restitution(0.1)))
+    .with_property(RigidBodyBuilder::dynamic())
+    .with_property(Colliders::new()
+        .add(ColliderBuilder::cuboid(0.5, 0.5, 0.5).mass(20.0).friction(0.7)))
 
-// The ground: never moves.
-Node::new("ground")
-    .with_property(Transform3D::default())
-    .with_property(Physics::fixed().collider(ColliderBuilder::halfspace(Vector3::y_axis())))
-
-// A player: a pill that never tips over.
+// A player: any Rapier body setting, straight on the builder.
 Node::new("player")
     .with_property(Transform3D::default())
-    .with_property(Physics::new(RigidBodyData { lock_rotations: true, ccd: true, ..RigidBodyData::dynamic(70.0) })
-        .collider(ColliderBuilder::capsule_y(0.5, 0.3)
+    .with_property(RigidBodyBuilder::dynamic().lock_rotations().ccd_enabled(true))
+    .with_property(Colliders::new()
+        .add(ColliderBuilder::capsule_y(0.5, 0.3)
             .translation(Vector3::new(0.0, 0.8, 0.0))      // feet at the node's origin
+            .mass(80.0)
             .friction(0.0)
             .friction_combine_rule(CoefficientCombineRule::Min)))
+
+// The ground, a wall: colliders and no body - they stay put.
+Node::new("ground")
+    .with_property(Transform3D::default())
+    .with_property(Colliders::new().add(ColliderBuilder::halfspace(Vector3::y_axis())))
 ```
 
-| | |
-|---|---|
-| `Physics::dynamic(mass)` | A moving body of `mass` kg |
-| `Physics::fixed()` | A body that never moves |
-| `Physics::new(RigidBodyData { .. })` | A body with more settings: `lock_rotations`, `ccd`, `gravity_scale`, `initial_velocity`, `center_of_mass` |
-| `.collider(c)` | One more collider: a `ColliderBuilder`, or a `Collider` with `.debug(..)` |
+| Body | Moved by | |
+|---|---|---|
+| `RigidBodyBuilder::dynamic()` | forces, gravity, collisions | crates, players, debris |
+| `RigidBodyBuilder::fixed()` | nothing | the same as no body, for non-sensor colliders |
+| `RigidBodyBuilder::kinematic_position_based()` | its node's `Transform3D` (section 2) | moving platforms, doors |
+| `RigidBodyBuilder::kinematic_velocity_based()` | the velocity you give it (`app.physics.body_mut(id)`); the engine leaves it alone | |
+| no `RigidBodyBuilder` | — | static colliders; or, if all are sensors, a zone following its node |
 
-A body has as many colliders as you give it, each placed with its own Rapier `translation` and `rotation`, in the body's frame.
+The body starts **where its node is**: a `translation` or `rotation` on the `RigidBodyBuilder` is replaced by the node's `Transform3D`. Colliders are placed on the body with their own `translation` and `rotation`, in the body's frame. A body can have as many colliders as you `add`.
+
+A body with no colliders is allowed too. It needs a mass of its own (`additional_mass_properties`, section 3) to move sensibly.
 
 ### Rapier settings worth knowing
 
 ```rust
-// Where it sits on the body, and how it's turned.
-ColliderBuilder::cylinder(0.2, 0.5).translation(Vector3::new(0.0, 1.0, 0.0)).rotation(Vector3::new(0.0, 0.0, std::f32::consts::FRAC_PI_2))
+// A body that slows down and stops spinning on its own.
+RigidBodyBuilder::dynamic().linear_damping(0.2).angular_damping(2.0)
 
 // Two touching colliders average their friction. So that a 0 always slides,
 // whatever it touches, the lower one wins:
@@ -65,25 +77,119 @@ ColliderBuilder::capsule_y(0.5, 0.3).friction(0.0).friction_combine_rule(Coeffic
 // A bouncy ball whose bounce wins over what it hits:
 ColliderBuilder::ball(0.2).restitution(0.9).restitution_combine_rule(CoefficientCombineRule::Max)
 
-// Anything else Rapier has: cones, round boxes, compounds, height fields...
+// Any shape Rapier has: cones, round boxes, compounds, height fields...
 ColliderBuilder::cone(1.0, 0.5)
 ColliderBuilder::round_cuboid(1.0, 0.5, 1.0, 0.1)
 ```
 
-### Shapes Rapier doesn't have: `physics::shapes`
-
-```rust
-use pankarta_software::physics::shapes;
-
-shapes::cylinder_with_sides(1.0, 1.0, 32)   // a cylinder with flat sides, like Blender's (Radius 1, Depth 2, 32 vertices)
-shapes::hemisphere(2.0)                     // a dome, flat side down
-```
-
-They're `ColliderBuilder`s like any other: `shapes::hemisphere(2.0).friction(0.4)`. Rapier's own `ColliderBuilder::cylinder` is perfectly round.
+Bodies have **no damping unless you give them some**: a dynamic body spins and slides until friction or something else stops it.
 
 ---
 
-## 2. Shapes from a model file
+## 2. Kinematic bodies: following the node
+
+A `kinematic_position_based` body goes **wherever its node's `Transform3D` is**, every frame, and nothing else moves it: no gravity, no pushing. It follows its node's world position, so a parent or an animation moving the node moves it too.
+
+```rust
+// A moving platform: a behaviour moves the node, the player rides it.
+Node::new("platform")
+    .with_property(Transform3D::default())
+    .with_property(RigidBodyBuilder::kinematic_position_based())
+    .with_property(Colliders::new().add(ColliderBuilder::cuboid(2.0, 0.2, 2.0)))
+    .with_behavior(MoveUpAndDown)
+```
+
+It pushes moving bodies it runs into, with its real speed.
+
+---
+
+## 3. Mass
+
+Mass is Rapier's, and can be set on the colliders, on the body, or both.
+
+### On the colliders: each part weighs something
+
+**Each collider carries some mass, and the body is their sum.** Rapier also works out the center of mass (where the weight is) and how the body spins (its inertia) from where the colliders are and their shapes.
+
+```rust
+.with_property(RigidBodyBuilder::dynamic())
+.with_property(Colliders::new()
+    .add(ColliderBuilder::cuboid(1.0, 0.5, 4.0).mass(2000.0))                                         // fuselage
+    .add(ColliderBuilder::cuboid(3.0, 0.1, 1.0).translation(Vector3::new(0.0, 0.2, 0.0)).mass(800.0))   // wings
+    .add(ColliderBuilder::cuboid(0.4, 0.4, 1.0).translation(Vector3::new(0.0, 0.0, -3.5)).mass(200.0))) // engine: pulls the center back
+
+// Or a density, in kg per cubic meter - the weight follows the size:
+ColliderBuilder::cuboid(0.5, 0.5, 0.5).density(600.0)   // wood: this 1 m³ crate weighs 600 kg
+```
+
+A collider with neither has a density of 1: a 1 m³ box weighs 1 kg. Add a part (a missile under a wing, with its `.mass(..)`) and the total, the center of mass and the inertia all follow.
+
+### On the body: numbers of your own
+
+| | |
+|---|---|
+| `RigidBodyBuilder::dynamic().additional_mass(kg)` | adds `kg` to whatever the colliders weigh; Rapier scales the inertia from the colliders' shapes |
+| `RigidBodyBuilder::dynamic().additional_mass_properties(MassProperties::new(center, kg, inertia))` | your exact mass, center of mass and inertia |
+
+Body mass is **added to** the colliders' mass. For the body's numbers to be **the final** ones (a real aircraft's documented mass, center of mass and inertia), make the colliders weigh nothing:
+
+```rust
+let colliders = Colliders::new()
+    .add(ColliderBuilder::cuboid(1.0, 0.5, 4.0).density(0.0))   // shape only, no weight
+    .add(ColliderBuilder::cuboid(3.0, 0.1, 1.0).density(0.0));
+let inertia = compute_principal_inertia(3000.0, center_of_mass, colliders.builders());
+
+Node::new("jet")
+    .with_property(Transform3D::default())
+    .with_property(RigidBodyBuilder::dynamic()
+        .additional_mass_properties(MassProperties::new(center_of_mass.into(), 3000.0, inertia)))
+    .with_property(colliders)
+```
+
+`pankarta_software::physics::compute_principal_inertia(mass, center_of_mass, colliders)` approximates the inertia from where the colliders are, each counted as the upright box around it; it takes any list of `ColliderBuilder`s. While the game runs, Rapier's `app.physics.body_mut(id).set_additional_mass_properties(..)` changes them (a loadout, fuel burning off).
+
+---
+
+## 4. Sensors: trigger zones
+
+A sensor is any collider with Rapier's **`.sensor(true)`**: it detects what overlaps it and stops nothing. Its node's behaviours hear about it (`on_sensor_enter` / `on_sensor_exit`), and `app.physics.entered(..)` / `exited(..)` / `is_inside(..)` tell anyone else.
+
+**`.detects(..)` and `.debug(..)` configure the collider added just before them**, so write them indented under it:
+
+```rust
+// A zone: only sensors and no body, so it follows its node.
+Node::new("zone")
+    .with_property(Transform3D { position, ..Default::default() })
+    .with_property(Colliders::new()
+        .add(ColliderBuilder::cylinder(1.0, 2.0).sensor(true))
+            .detects(["player"])            // only nodes with Layers::new(["player"])
+            .debug(ColliderDebug::new()))   // drawn, with no debug view on
+    .with_behavior(Zone)
+
+// A pickup radius around a player: one more collider on its body.
+Node::new("player")
+    .with_property(RigidBodyBuilder::dynamic().lock_rotations())
+    .with_property(Colliders::new()
+        .add(ColliderBuilder::capsule_y(0.5, 0.3).mass(80.0))
+        .add(ColliderBuilder::ball(2.0).sensor(true))
+            .detects(["coin"]))
+```
+
+A sensor detects moving bodies (and ones an animation holds still), not fixed ones.
+
+### Domes
+
+For a dome on the ground, a whole ball centered on the ground works exactly like one: its lower half is under the floor, where nothing goes.
+
+```rust
+Colliders::new().add(ColliderBuilder::ball(2.0).sensor(true))
+```
+
+When something can be under it (a dome on a platform, or floating), use `Collider::hemisphere` (section 6).
+
+---
+
+## 5. Shapes from a model file
 
 `Collider::from_model` gives a **Rapier `ColliderBuilder`** whose shape comes from a model's meshes, so every Rapier setting chains straight onto it:
 
@@ -92,10 +198,11 @@ let table = Model::file("models/table.glb");
 
 Node::new("table")
     .with_property(Transform3D::default())
-    .with_property(Physics::dynamic(15.0)
-        .collider(Collider::from_model(&table, Meshes::all(), ModelShape::ConvexHull)
-            .friction(0.6)
-            .density(2.0)))
+    .with_property(RigidBodyBuilder::dynamic())
+    .with_property(Colliders::new()
+        .add(Collider::from_model(&table, Meshes::all(), ModelShape::ConvexHull)
+            .mass(15.0)
+            .friction(0.6)))
     .with_property(table)
 ```
 
@@ -105,16 +212,19 @@ Node::new("table")
 Node::new("crate")
     .with_property(Transform3D::default())
     .with_property(Model::file("models/crate.glb"))
-    .with_property(Physics::dynamic(20.0)
-        .collider(Collider::from_own_model(Meshes::named(["crate_col"]), ModelShape::ConvexHull)))
+    .with_property(RigidBodyBuilder::dynamic())
+    .with_property(Colliders::new()
+        .add(Collider::from_own_model(Meshes::named(["crate_col"]), ModelShape::ConvexHull).mass(20.0)))
 ```
+
+A model collider can be a sensor too: `.add(Collider::from_model(&level, Meshes::named(["zone_exit"]), ModelShape::ConvexHull).sensor(true))`.
 
 ### Which shape: `ModelShape`
 
 | | Gives | Use it for |
 |---|---|---|
 | `ModelShape::ConvexHull` | The shrink-wrapped outline, solid, dents filled in | Moving bodies; sensors |
-| `ModelShape::Trimesh` | The exact surface, hollow | **Static** bodies only: terrain, buildings, a level |
+| `ModelShape::Trimesh` | The exact surface, hollow | Bodies that never move: terrain, buildings, a level |
 | `ModelShape::ConvexDecomposition` | Solid convex pieces Rapier works out for you | Moving concave bodies, when you didn't model pieces yourself |
 
 ### What happens, and when
@@ -141,13 +251,13 @@ A model file often holds several meshes. In Blender each object becomes a mesh w
 | `Meshes::named(["rock_col"])` | The meshes with these names |
 | `Meshes::prefix("col_")` | The meshes whose names start with `col_` |
 
-A common practice is to model a **simple collision mesh** next to the detailed one in the same file, named so it can be picked (`rock_col`, or `col_` pieces), and hide it (section 3).
+A common practice is to model a **simple collision mesh** next to the detailed one in the same file, named so it can be picked (`rock_col`, or `col_` pieces), and hide it (below).
 
 `app.assets.collision_meshes.mesh_names("models/table.glb")` lists a loaded file's mesh names, for checking a selector that matches nothing.
 
 ### One collider, or one per mesh: `.each()`
 
-The meshes picked are **merged** into one shape. With `.each()`, each mesh becomes **its own collider**, all with the same settings.
+The meshes picked are **merged** into one shape. With `.each()`, each mesh becomes **its own collider**, all with the same settings (a `.mass(..)` is each one's mass).
 
 This matters for convex hulls. Take a table modeled for collision as five boxes, `col_top` and `col_leg1` to `col_leg4`:
 
@@ -162,17 +272,16 @@ Collider::from_model(&table, Meshes::prefix("col_").each(), ModelShape::ConvexHu
 
 `.each()` is how a **moving** concave object gets a shape that follows it, from the simple pieces modeled for it. Merging is right when it loses nothing: a single collision mesh, a `Trimesh` (it keeps every gap), or a `ConvexDecomposition` (Rapier splits it itself).
 
----
-
-## 3. Hiding the collision meshes: `Model::hide_meshes`
+### Hiding the collision meshes: `Model::hide_meshes`
 
 ```rust
 let table = Model::file("models/table.glb").hide_meshes(Meshes::prefix("col_"));
 
 Node::new("table")
     .with_property(Transform3D::default())
-    .with_property(Physics::dynamic(15.0)
-        .collider(Collider::from_model(&table, Meshes::prefix("col_").each(), ModelShape::ConvexHull).friction(0.6)))
+    .with_property(RigidBodyBuilder::dynamic())
+    .with_property(Colliders::new()
+        .add(Collider::from_model(&table, Meshes::prefix("col_").each(), ModelShape::ConvexHull).mass(3.0)))
     .with_property(table)
 ```
 
@@ -180,27 +289,19 @@ The hidden meshes cast no shadow either. Every node hiding the same meshes of a 
 
 ---
 
-## 4. Sensors
-
-A `Sensor` is a collider that detects and stops nothing. Its node's behaviours hear about what enters and leaves it (`on_sensor_enter` / `on_sensor_exit`). Any `ColliderBuilder` becomes one, model ones too:
+## 6. Shapes Rapier doesn't have
 
 ```rust
-Sensor::from(ColliderBuilder::ball(1.5).translation(Vector3::new(0.0, 1.5, 0.0)))
-Sensor::from(shapes::hemisphere(2.0))
-Sensor::from(Collider::from_model(&level, Meshes::named(["zone_exit"]), ModelShape::ConvexHull))
-Sensor::from(Collider::from_model(&level, Meshes::prefix("zone_l_").each(), ModelShape::ConvexHull))   // an L from two boxes
-Sensor::from(Collider::from_own_model(Meshes::all(), ModelShape::ConvexHull))
-    .detects(["player"])          // only nodes with Layers::new(["player"])
-    .debug(ColliderDebug::new())  // drawn, with no debug view on
+Collider::hemisphere(2.0)                     // a dome, flat side down
+Collider::cylinder_with_sides(1.0, 1.0, 32)   // a cylinder with flat sides, like Blender's (Radius 1, Depth 2, 32 vertices)
 ```
 
-On a node without `Physics`, a sensor follows the node. On a node with `Physics`, it's one more collider on that body.
+They give a `ColliderBuilder` like any other, so Rapier settings chain on: `.add(Collider::hemisphere(2.0).sensor(true))`. Both are convex hulls around points on the shape, so the dome is a little faceted. Rapier's own `ColliderBuilder::cylinder` is perfectly round.
 
 ---
 
-## 5. Things to know
+## 7. Things to know
 
 - **Your node's `Layers`** set each collider's collision groups, unless you gave the builder groups of your own (`.collision_groups(..)`).
-- **Rotational inertia** is worked out from the colliders: each solid collider counts as the upright box around it. Sensors, half spaces and triangle meshes don't count.
-- **Rapier's API changes between versions.** Code using `ColliderBuilder` may need small changes when the engine moves to a newer Rapier.
+- **Rapier's API changes between versions.** Code using its builders may need small changes when the engine moves to a newer Rapier.
 - **Debug drawing** draws boxes, balls, cylinders, cones, capsules, convex shapes, triangle meshes and compounds of those.

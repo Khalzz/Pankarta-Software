@@ -22,7 +22,7 @@ pub fn sign_glass(id: &str, position: Vector3<f32>, yaw: f32) -> Node {
             .part("left_post", post(-1.0))
             .part("right_post", post(1.0))
             .part("glass", glass(position, rotation)))
-        .with_property(Physics::fixed().collider(post_collider(-1.0)).collider(post_collider(1.0)).collider(glass_collider()))
+        .with_property(Colliders::new().add(post_collider(-1.0)).add(post_collider(1.0)).add(glass_collider()))
 }
 
 /// A thin box where the pane is, so you can't walk through it.

@@ -1,7 +1,8 @@
-//! A trigger zone: a pad on the ground with a `Sensor` over it that detects
-//! the player (its `Layers`) walking in and out - its behavior hears it in
+//! A trigger zone: a pad on the ground with a sensor collider over it (no
+//! body of its own, so it goes wherever the node is) that detects the player
+//! (its `Layers`) walking in and out - its behavior hears it in
 //! `on_sensor_enter`/`on_sensor_exit`, and the scene's HUD asks
-//! `app.physics.is_inside(..)`. Its area is drawn (`Sensor::debug`): blue,
+//! `app.physics.is_inside(..)`. Its area is drawn (`Colliders::debug`): blue,
 //! orange while the player's in it.
 
 use nalgebra::Vector3;
@@ -20,15 +21,15 @@ pub fn zone(id: &str, position: Vector3<f32>) -> Node {
                 .material(Material::standard().color(UiColor::Rgb(60, 180, 255))),
         )
         // A cylinder standing on the pad, as tall as the player.
-        .with_property(
-            Sensor::from(ColliderBuilder::cylinder(HEIGHT / 2.0, RADIUS).translation(Vector3::y() * HEIGHT / 2.0))
+        // No body of its own: a node with only sensors follows its node.
+        .with_property(Colliders::new()
+            .add(ColliderBuilder::cylinder(HEIGHT / 2.0, RADIUS).translation(Vector3::y() * HEIGHT / 2.0).sensor(true))
                 .detects(["player"])
                 .debug(ColliderDebug::new()
                     .edges(UiColor::Rgb(60, 180, 255))
                     .faces(UiColor::Rgba(60, 180, 255, 35))
                     .occupied_edges(UiColor::Rgb(255, 160, 40))
-                    .occupied_faces(UiColor::Rgba(255, 160, 40, 50))),
-        )
+                    .occupied_faces(UiColor::Rgba(255, 160, 40, 50))))
         .with_behavior(Zone { visits: 0 })
 }
 

@@ -103,7 +103,7 @@ impl FarFromOriginScene {
                         .transform(Transform3D { scale: Vector3::new(FLOOR_SIZE, 1.0, FLOOR_SIZE), ..Default::default() })
                         .material(Material::standard().texture(GROUND_TEXTURE).tiled(4.0, TextureSpace::World)))
                     // A slab whose top is the floor's surface.
-                    .with_property(Physics::fixed().collider(ColliderBuilder::cuboid(FLOOR_SIZE / 2.0, 0.5, FLOOR_SIZE / 2.0)
+                    .with_property(Colliders::new().add(ColliderBuilder::cuboid(FLOOR_SIZE / 2.0, 0.5, FLOOR_SIZE / 2.0)
                         .translation(Vector3::new(0.0, -0.5, 0.0)))),
             );
             nodes.push(

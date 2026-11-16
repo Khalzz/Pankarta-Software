@@ -24,8 +24,9 @@ pub enum Space {
 /// writes the world transform from it every frame; for a `Global` child,
 /// `local` is unused and its `Transform3D` is the one to move.
 ///
-/// A child with a `Physics` body isn't moved by its parent - the physics
-/// does that.
+/// A child with a `RigidBodyBuilder` isn't moved by its parent - the
+/// physics does that - unless it's kinematic position-based, which follows
+/// its node wherever the parent takes it.
 ///
 /// A 2D child of a 2D parent works the same with `Transform2D` and
 /// `local_2d`; given no transform at all, a child of a 2D parent is 2D.

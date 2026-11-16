@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use nalgebra::{vector, UnitQuaternion, Vector3};
+use nalgebra::{UnitQuaternion, Vector3};
 use rapier3d::prelude::*;
 
 use crate::physics::body;
@@ -12,16 +12,19 @@ pub struct PhysicsData {
 
 
 
-/// A rigid body's Cuboid colliders, treated as a mass-distributed box assembly, to
-/// approximate its rotational inertia. Mass is distributed across colliders proportional
-/// to their volume, and each box's own inertia plus its parallel-axis contribution
-/// (from sitting off the body's center of mass) is summed. This makes inertia follow
-/// whatever real-world dimensions and mass a plane is actually authored with, instead of
-/// a single constant every dynamic body shared regardless of size — so a model built at
-/// (1,1,1) and scaled up to its real-life size (colliders/positions authored to match)
-/// gets physically appropriate rotational resistance automatically, with no per-plane
-/// hand-tuning of inertia required.
-pub(crate) fn compute_principal_inertia(mass: f32, center_of_mass: Vector3<f32>, colliders: &[body::Collider]) -> Vector3<f32> {
+/// Rotational inertia for a body of `mass` kg with its center of mass at
+/// `center_of_mass`, worked out from where its `colliders` are and how big:
+/// each solid one (not sensors, half spaces or triangle meshes) counts as
+/// the upright box around it, its share of `mass` by volume, plus how far
+/// it sits from the center of mass. For giving a body exact numbers of
+/// your own - with its colliders at `density(0.0)` so they add nothing:
+///
+///     let inertia = compute_principal_inertia(3000.0, center_of_mass, colliders.builders());
+///     RigidBodyBuilder::dynamic().additional_mass_properties(MassProperties::new(center_of_mass.into(), 3000.0, inertia))
+///
+/// Rapier's own (from the colliders' `mass`/`density`) is exact for every
+/// shape - this is an approximation for when the numbers must be yours.
+pub fn compute_principal_inertia<'a>(mass: f32, center_of_mass: Vector3<f32>, colliders: impl IntoIterator<Item = &'a ColliderBuilder>) -> Vector3<f32> {
     struct BoxPart {
         volume: f32,
         half_extents: (f32, f32, f32),
@@ -31,12 +34,12 @@ pub(crate) fn compute_principal_inertia(mass: f32, center_of_mass: Vector3<f32>,
     // Each solid collider counted as the upright box around it, where it
     // sits - not sensors, nor shapes with no inside (a half space, a
     // triangle mesh).
-    let boxes: Vec<BoxPart> = colliders.iter().filter(|collider| !collider.is_sensor()).filter_map(|collider| {
-        let shape = &collider.builder.shape;
+    let boxes: Vec<BoxPart> = colliders.into_iter().filter(|collider| !collider.is_sensor).filter_map(|collider| {
+        let shape = &collider.shape;
         if shape.as_halfspace().is_some() || shape.as_trimesh().is_some() || shape.as_heightfield().is_some() {
             return None;
         }
-        let aabb = shape.compute_aabb(&collider.builder.position);
+        let aabb = shape.compute_aabb(&collider.position);
         let half = aabb.half_extents();
         let center = aabb.center();
         let volume = 8.0 * half.x * half.y * half.z;
@@ -73,7 +76,7 @@ pub(crate) fn compute_principal_inertia(mass: f32, center_of_mass: Vector3<f32>,
     inertia
 }
 
-/// A node's `Physics` property (see `engine::scene_manager::physics_bridge`)
+/// A node's body and colliders (see `engine::scene_manager::physics_bridge`)
 /// plus the position and rotation it was spawned at - what its body is made
 /// from, extracted once at spawn time the same way
 /// `render_bridge::register_static_model` extracts `Transform3D`+`Model` into
@@ -86,11 +89,15 @@ pub struct PhysicsObjectDef {
     pub id: String,
     pub position: Vector3<f32>,
     pub rotation: UnitQuaternion<f32>,
-    pub physics: body::Physics,
+    /// Rapier's body - the node's `RigidBodyBuilder`, or the one its
+    /// colliders imply (see `body::implied_body`).
+    pub body: RigidBodyBuilder,
+    /// Its colliders, read from their models already.
+    pub colliders: Vec<body::Collider>,
     /// Its node's `Layers` - what sensors see it as.
     pub layers: Vec<String>,
     /// A body that follows its node's `Transform3D` instead of moving on
-    /// its own - a node with a `Sensor` and no `Physics`.
+    /// its own - a kinematic position-based one.
     pub follows_node: bool,
 }
 
@@ -134,38 +141,14 @@ impl LayerBits {
 /// (see that type's own doc comment) - one body each, with its colliders.
 pub(crate) fn load_physics_from_definitions(defs: &[PhysicsObjectDef], collider_set: &mut ColliderSet, rigidbody_set: &mut RigidBodySet, physics_handlers: &mut HashMap<String, Option<PhysicsData>>, layers: &mut LayerBits, debugged: &mut HashMap<ColliderHandle, body::ColliderDebug>) {
     for def in defs {
-        let mut rigid_body = if def.follows_node {
-            RigidBodyBuilder::kinematic_position_based().translation(def.position).build()
-        } else if def.physics.rigidbody.is_static {
-            RigidBodyBuilder::fixed()
-                .additional_mass(def.physics.rigidbody.mass)
-                .translation(vector![def.position.x, def.position.y, def.position.z])
-                .build()
-        } else {
-            let principal_inertia = compute_principal_inertia(
-                def.physics.rigidbody.mass,
-                def.physics.rigidbody.center_of_mass,
-                &def.physics.colliders,
-            );
-
-            let mut builder = RigidBodyBuilder::dynamic()
-                .additional_mass_properties(rapier3d::prelude::MassProperties::new(def.physics.rigidbody.center_of_mass.into(), def.physics.rigidbody.mass, principal_inertia))
-                .translation(def.position)
-                .angular_damping(2.0)
-                .ccd_enabled(def.physics.rigidbody.ccd)
-                .gravity_scale(def.physics.rigidbody.gravity_scale);
-            if def.physics.rigidbody.lock_rotations {
-                builder = builder.lock_rotations();
-            }
-            builder.build()
-        };
-
-        rigid_body.set_rotation(def.rotation, true);
-        rigid_body.set_linvel(def.physics.rigidbody.initial_velocity, true);
+        // Rapier's body as the game wrote it - placed where its node is.
+        let rigid_body = def.body.clone()
+            .position(Isometry::from_parts(def.position.into(), def.rotation))
+            .build();
         let rigidbody_handle = rigidbody_set.insert(rigid_body);
 
         let mut collider_handles: Vec<ColliderHandle> = Vec::new();
-        for collider_data in &def.physics.colliders {
+        for collider_data in &def.colliders {
             // Read from its model when its node spawned (see
             // scene_manager::physics_bridge) - one still a stand-in never was.
             if crate::physics::model_shape::ModelPlaceholder::of(&collider_data.builder).is_some() {

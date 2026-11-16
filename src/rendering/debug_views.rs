@@ -20,7 +20,7 @@ use crate::rendering::models::textures::Texture;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DebugViews {
     pub physics: bool,
-    /// Every sensor's area (see `Sensor`) - cyan while it's empty, green
+    /// Every sensor collider's area (Rapier's `sensor`) - cyan while it's empty, green
     /// while something overlaps it. Also part of `physics`.
     pub sensors: bool,
     pub wireframe: bool,

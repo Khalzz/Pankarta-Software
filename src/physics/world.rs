@@ -16,7 +16,7 @@
 //! so a body moves smoothly at any frame rate, without ever being drawn
 //! somewhere it hasn't really been.
 //!
-//! Sensors (see `Sensor`) are checked after every step: what started or
+//! Sensors (colliders with Rapier's `sensor`) are checked after every step: what started or
 //! stopped overlapping each one is `sensor_events`, and is handed to the
 //! sensor node's behaviors (`Behavior::on_sensor_enter`/`on_sensor_exit`).
 
@@ -107,7 +107,7 @@ pub struct PhysicsWorld {
     sensors: HashMap<String, HashSet<String>>,
     /// What started or stopped overlapping a sensor in the last step.
     sensor_events: Vec<SensorEvent>,
-    /// Nodes whose body follows their node (a `Sensor` without `Physics`).
+    /// Nodes whose body follows their node (a kinematic position-based one).
     followers: HashSet<String>,
 }
 
@@ -187,7 +187,7 @@ impl PhysicsWorld {
     }
 
     /// The world's gravity, in m/s² - what every body falls by (times its
-    /// own `RigidBodyData::gravity_scale`). (0, -9.81, 0) by default.
+    /// own `gravity_scale`, Rapier's `RigidBodyBuilder::gravity_scale`). (0, -9.81, 0) by default.
     pub fn gravity(&self) -> Vector3<f32> {
         self.gravity
     }
@@ -261,7 +261,7 @@ impl PhysicsWorld {
     }
 
     /// How much of the world's gravity node `id`'s body feels from now on -
-    /// see `RigidBodyData::gravity_scale`.
+    /// see Rapier's `RigidBodyBuilder::gravity_scale`.
     pub fn set_gravity_scale(&mut self, id: &str, scale: f32) {
         if let Some(body) = self.body_mut(id) {
             body.set_gravity_scale(scale, true);
@@ -307,7 +307,7 @@ impl PhysicsWorld {
         self.followers.iter().map(String::as_str)
     }
 
-    /// Moves node `id`'s following body (a `Sensor` without `Physics`) to
+    /// Moves node `id`'s following body (a kinematic position-based one) to
     /// where its node is, by the next step.
     pub(crate) fn follow(&mut self, id: &str, position: Vector3<f32>, rotation: UnitQuaternion<f32>) {
         if let Some(body) = self.body_mut(id) {
@@ -333,7 +333,7 @@ impl PhysicsWorld {
         let mut loaded = HashMap::new();
         load_physics_from_definitions(std::slice::from_ref(&def), &mut self.colliders, &mut self.bodies, &mut loaded, &mut self.layers, &mut self.debugged);
         if let Some(Some(data)) = loaded.remove(&id) {
-            if def.physics.colliders.iter().any(|collider| collider.is_sensor()) {
+            if def.colliders.iter().any(|collider| collider.is_sensor()) {
                 self.sensors.insert(id.clone(), HashSet::new());
             }
             if def.follows_node {
@@ -670,28 +670,36 @@ fn circle(lines: &mut Lines, world: &dyn Fn(Vector3<f32>) -> Vector3<f32>, cente
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::physics::{shapes, Physics, RigidBodyData, Sensor};
+    use crate::physics::body::{follows_node, implied_body};
+    use crate::physics::{Collider, Colliders};
+    use rapier3d::prelude::RigidBodyBuilder;
     use rapier3d::prelude::ColliderBuilder;
 
-    fn def(id: &str, position: Vector3<f32>, physics: Physics, layers: &[&str], follows_node: bool) -> PhysicsObjectDef {
+    /// A node's body as physics_bridge makes it: its `body`, or the one its
+    /// `colliders` imply.
+    fn def(id: &str, position: Vector3<f32>, body: Option<RigidBodyBuilder>, colliders: Colliders, layers: &[&str]) -> PhysicsObjectDef {
+        let colliders = colliders.into_entries();
+        let body = body.unwrap_or_else(|| implied_body(&colliders));
         PhysicsObjectDef {
             id: id.to_owned(),
             position,
             rotation: UnitQuaternion::identity(),
-            physics,
+            follows_node: follows_node(&body),
+            body,
+            colliders,
             layers: layers.iter().map(|layer| layer.to_string()).collect(),
-            follows_node,
         }
     }
 
     fn ball(id: &str, x: f32, layers: &[&str]) -> PhysicsObjectDef {
-        let physics = Physics::dynamic(1.0).collider(ColliderBuilder::ball(0.25));
-        def(id, Vector3::new(x, 5.0, 0.0), physics, layers, false)
+        let colliders = Colliders::new().add(ColliderBuilder::ball(0.25).mass(1.0));
+        def(id, Vector3::new(x, 5.0, 0.0), Some(RigidBodyBuilder::dynamic()), colliders, layers)
     }
 
+    /// A trigger zone: sensor colliders and no body of its own.
     fn zone(detects: &[&str]) -> PhysicsObjectDef {
-        let sensor = Sensor::from(ColliderBuilder::cuboid(3.0, 1.0, 3.0)).detects(detects.iter().copied());
-        def("zone", Vector3::zeros(), Physics::new(RigidBodyData::default()).collider(sensor.collider), &[], true)
+        let colliders = Colliders::new().add(ColliderBuilder::cuboid(3.0, 1.0, 3.0).sensor(true)).detects(detects.iter().copied());
+        def("zone", Vector3::zeros(), None, colliders, &[])
     }
 
     /// Steps until the balls fell through the zone and out the bottom,
@@ -738,9 +746,9 @@ mod tests {
     #[test]
     fn debugged_collider_draws_with_no_view_on() {
         let mut world = PhysicsWorld::new();
-        let sensor = Sensor::from(ColliderBuilder::ball(1.0)).debug(crate::physics::ColliderDebug::new());
+        let sensor = Colliders::new().add(ColliderBuilder::ball(1.0).sensor(true)).debug(crate::physics::ColliderDebug::new());
         world.start(vec![
-            def("zone", Vector3::zeros(), Physics::new(RigidBodyData::default()).collider(sensor.collider), &[], true),
+            def("zone", Vector3::zeros(), None, sensor, &[]),
             ball("rock", 10.0, &[]),
         ]);
         world.steps_due(0.0, false, false);
@@ -757,9 +765,9 @@ mod tests {
     #[test]
     fn hemisphere_is_only_the_top_half() {
         let mut world = PhysicsWorld::new();
-        let zone = Sensor::from(shapes::hemisphere(2.0));
+        let zone = Colliders::new().add(Collider::hemisphere(2.0).sensor(true));
         world.start(vec![
-            def("dome", Vector3::zeros(), Physics::new(RigidBodyData::default()).collider(zone.collider), &[], true),
+            def("dome", Vector3::zeros(), None, zone, &[]),
             ball("above", 0.0, &[]),
             ball("below", 0.0, &[]),
         ]);
@@ -773,7 +781,7 @@ mod tests {
 
     #[test]
     fn hemisphere_outline_has_no_lines_across_its_base() {
-        let shape = shapes::hemisphere(2.0).shape;
+        let shape = Collider::hemisphere(2.0).shape;
         let mut lines = Lines::default();
         draw_shape(&mut lines, &Isometry3::identity(), &*shape, [1.0; 3]);
         // On the ground, only the rim - no line through the inside of the base.
@@ -797,5 +805,52 @@ mod tests {
         world.step();
         assert!(world.is_inside("zone", "rock"));
         assert!(world.render_poses().all(|(id, _)| id != "zone"));
+    }
+
+    #[test]
+    fn a_body_is_placed_at_its_node_and_weighs_what_its_colliders_say() {
+        let mut world = PhysicsWorld::new();
+        // The builder's own position is replaced by the node's.
+        let body = RigidBodyBuilder::dynamic().translation(Vector3::new(99.0, 99.0, 99.0));
+        let colliders = Colliders::new()
+            .add(ColliderBuilder::cuboid(0.5, 0.5, 0.5).mass(20.0))
+            .add(ColliderBuilder::ball(0.5).translation(Vector3::new(0.0, 2.0, 0.0)).mass(5.0));
+        world.start(vec![def("crate", Vector3::new(1.0, 2.0, 3.0), Some(body), colliders, &[])]);
+        let body = world.body("crate").unwrap();
+        assert!((body.translation() - Vector3::new(1.0, 2.0, 3.0)).norm() < 1e-5);
+        // Exactly the colliders' masses - nothing hidden added.
+        assert!((body.mass() - 25.0).abs() < 1e-3, "mass {}", body.mass());
+        // The center of mass is pulled toward the heavier part: 5 kg at y=2.
+        assert!((body.center_of_mass().y - (2.0 + 5.0 * 2.0 / 25.0)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn body_level_mass_is_final_with_weightless_colliders() {
+        // What a flight model does: its own mass, center and inertia, the
+        // colliders only shaping it.
+        let mut world = PhysicsWorld::new();
+        let colliders = Colliders::new().add(ColliderBuilder::cuboid(1.0, 0.5, 4.0).density(0.0));
+        let center = Vector3::new(0.0, 0.8, 0.0);
+        let inertia = crate::physics::compute_principal_inertia(3000.0, center, colliders.builders());
+        let body = RigidBodyBuilder::dynamic().additional_mass_properties(rapier3d::prelude::MassProperties::new(center.into(), 3000.0, inertia));
+        world.start(vec![def("jet", Vector3::zeros(), Some(body), colliders, &[])]);
+        world.set_gravity(Vector3::zeros());
+        // Rapier adds the body's own mass when it next updates it.
+        world.step();
+        let body = world.body("jet").unwrap();
+        assert!((body.mass() - 3000.0).abs() < 1e-2, "mass {}", body.mass());
+        assert!((body.center_of_mass().coords - center).norm() < 1e-4);
+    }
+
+    #[test]
+    fn colliders_without_a_body_stay_put_or_follow_as_zones() {
+        let mut world = PhysicsWorld::new();
+        world.start(vec![
+            def("wall", Vector3::zeros(), None, Colliders::new().add(ColliderBuilder::cuboid(1.0, 1.0, 1.0)), &[]),
+            def("zone", Vector3::zeros(), None, Colliders::new().add(ColliderBuilder::ball(1.0).sensor(true)), &[]),
+        ]);
+        assert!(world.body("wall").unwrap().is_fixed());
+        assert!(world.body("zone").unwrap().is_kinematic());
+        assert!(world.followers().any(|id| id == "zone") && !world.followers().any(|id| id == "wall"));
     }
 }

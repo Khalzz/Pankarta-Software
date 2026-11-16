@@ -917,7 +917,7 @@ impl App {
             if self.origin.has_pending() {
                 self.update_origin(scene, false);
             }
-            // Sensors without a body of their own go where their node is.
+            // Kinematic position-based bodies go where their node is.
             let followed: Vec<(String, crate::scene_manager::node::properties::Transform3D)> = self.physics.followers()
                 .filter_map(|id| Some((id.to_owned(), scene.world_transform(id)?)))
                 .collect();

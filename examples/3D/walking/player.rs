@@ -67,14 +67,14 @@ impl Behavior for Player {
         });
         // What sensors see it as (see zone.rs).
         node.set_property(Layers::new(["player"]));
-        node.set_property(
-            Physics::new(RigidBodyData { lock_rotations: true, ccd: true, ..RigidBodyData::dynamic(PLAYER_MASS) })
-                // No grip at all, whatever it touches (the lower friction of
-                // two wins): it slides along walls instead of sticking to them.
-                .collider(ColliderBuilder::capsule_y(PLAYER_HALF_HEIGHT - PLAYER_RADIUS, PLAYER_RADIUS)
-                    .friction(0.0)
-                    .friction_combine_rule(CoefficientCombineRule::Min)),
-        );
+        node.set_property(RigidBodyBuilder::dynamic().lock_rotations().ccd_enabled(true));
+        node.set_property(Colliders::new()
+            // No grip at all, whatever it touches (the lower friction of
+            // two wins): it slides along walls instead of sticking to them.
+            .add(ColliderBuilder::capsule_y(PLAYER_HALF_HEIGHT - PLAYER_RADIUS, PLAYER_RADIUS)
+                .mass(PLAYER_MASS)
+                .friction(0.0)
+                .friction_combine_rule(CoefficientCombineRule::Min)));
 
         let camera = Node::new("camera")
             .with_property(Transform3D::default())

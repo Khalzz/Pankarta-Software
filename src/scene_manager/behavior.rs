@@ -52,8 +52,8 @@ pub trait Behavior: Any + AsAny {
     /// depends on may only be visible once the node is fully built (mirrors
     /// Godot's `_ready` vs `_init` split).
     ///
-    /// A behavior can set its own node up here: a `Model`, `Physics` or
-    /// `CameraLens` it puts on (`node.set_property(..)`) is drawn, given a
+    /// A behavior can set its own node up here: a `Model`, a body
+    /// (`RigidBodyBuilder`, `Colliders`) or `CameraLens` it puts on (`node.set_property(..)`) is drawn, given a
     /// body or made a camera the same as one the node was spawned with.
     fn on_spawn(&mut self, node: &mut Node, scene: &mut SceneAccess, app: &mut App) {
         let _ = (node, scene, app);
@@ -90,7 +90,7 @@ pub trait Behavior: Any + AsAny {
     }
 
     /// Runs when node `other` (its id) starts overlapping this node's
-    /// `Sensor` (or a sensor collider on its body) - right after the
+    /// sensor collider (Rapier's `sensor`, in its `Colliders`) - right after the
     /// physics step it happened in. `scene.get_node(other)` to look at it.
     fn on_sensor_enter(&mut self, node: &mut Node, other: &str, scene: &mut SceneAccess, app: &mut App) {
         let _ = (node, other, scene, app);

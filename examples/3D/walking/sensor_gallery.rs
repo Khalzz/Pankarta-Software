@@ -1,15 +1,18 @@
 //! A ring of sensors of every shape, outside the ring of cubes - walk (and
 //! jump) into each: its area turns white while you're in it, the console
 //! says when you enter and leave, and the HUD lists the ones you're in.
+//! Each is a collider with Rapier's `sensor` and no body of its own, so it
+//! goes wherever its node is.
 //!
-//! - sphere, hemisphere (a dome on the ground), box (turned), capsule
-//!   (lying down), cylinder,
+//! - sphere, box (turned), capsule (lying down), cylinder,
+//! - two domes: a whole ball half under the ground (exact - nothing goes
+//!   under the floor), and `Collider::hemisphere` raised off it (a real
+//!   dome shape, for when something can be under it),
 //! - a convex hull from points (a pyramid),
 //! - a small sphere just over head height (jump into it), and one that
 //!   moves around.
 
 use nalgebra::{Point3, UnitQuaternion, Vector3};
-use pankarta_software::physics::shapes;
 use pankarta_software::prelude::*;
 
 /// How far out the ring is - the cubes are at 12.
@@ -19,9 +22,10 @@ const PATROL_RADIUS: f32 = 3.0;
 const PATROL_SPEED: f32 = 0.6;
 
 /// Every sensor's node id, with what the HUD calls it.
-pub const SENSORS: [(&str, &str); 8] = [
+pub const SENSORS: [(&str, &str); 9] = [
     ("sensor_sphere", "sphere"),
-    ("sensor_dome", "hemisphere"),
+    ("sensor_dome", "dome (ball in the ground)"),
+    ("sensor_raised_dome", "raised dome (hemisphere)"),
     ("sensor_box", "box"),
     ("sensor_capsule", "capsule"),
     ("sensor_cylinder", "cylinder"),
@@ -42,19 +46,23 @@ pub fn sensor_gallery() -> Vec<Node> {
     .expect("a pyramid has a hull");
     let up = |height: f32| Vector3::y() * height;
     let sensors = [
-        Sensor::from(ColliderBuilder::ball(1.5).translation(up(1.5))),
-        Sensor::from(shapes::hemisphere(2.2)),
-        Sensor::from(ColliderBuilder::cuboid(2.5, 1.0, 1.0).translation(up(1.0))),
+        ColliderBuilder::ball(1.5).translation(up(1.5)),
+        // Centered on the ground: its lower half is under the floor.
+        ColliderBuilder::ball(2.2),
+        // Its node is raised (below).
+        Collider::hemisphere(1.8),
+        ColliderBuilder::cuboid(2.5, 1.0, 1.0).translation(up(1.0)),
         // Standing, its node turned to lay it down.
-        Sensor::from(ColliderBuilder::capsule_y(1.5, 0.8)),
-        Sensor::from(ColliderBuilder::cylinder(1.0, 1.8).translation(up(1.0))),
-        Sensor::from(pyramid),
-        Sensor::from(ColliderBuilder::ball(0.7)),
-        Sensor::from(ColliderBuilder::ball(1.2).translation(up(1.2))),
+        ColliderBuilder::capsule_y(1.5, 0.8),
+        ColliderBuilder::cylinder(1.0, 1.8).translation(up(1.0)),
+        pyramid,
+        ColliderBuilder::ball(0.7),
+        ColliderBuilder::ball(1.2).translation(up(1.2)),
     ];
     let colors = [
         UiColor::Rgb(255, 80, 80),
         UiColor::Rgb(240, 240, 120),
+        UiColor::Rgb(200, 160, 255),
         UiColor::Rgb(255, 220, 60),
         UiColor::Rgb(255, 140, 40),
         UiColor::Rgb(80, 230, 110),
@@ -74,6 +82,7 @@ pub fn sensor_gallery() -> Vec<Node> {
                 transform.position.y = 0.8;
                 transform.rotation = UnitQuaternion::from_euler_angles(0.0, 0.0, 90f32.to_radians());
             }
+            "sensor_raised_dome" => transform.position.y = 1.2,
             "sensor_high" => transform.position.y = 3.0,
             _ => {}
         }
@@ -85,7 +94,10 @@ pub fn sensor_gallery() -> Vec<Node> {
             .occupied_faces(UiColor::WHITE.with_alpha(0.3));
         let node = Node::new(id)
             .with_property(transform)
-            .with_property(sensor.detects(["player"]).debug(look))
+            .with_property(Colliders::new()
+                .add(sensor.sensor(true))
+                    .detects(["player"])
+                    .debug(look))
             .with_behavior(Announce { name, patrol: (id == "sensor_moving").then_some((spot, 0.0)) });
         nodes.push(node);
     }

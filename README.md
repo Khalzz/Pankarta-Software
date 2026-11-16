@@ -113,7 +113,7 @@ App                         the engine: window, renderer, physics, input, audio,
     └── Scene               one "screen" of the game: a menu, a level
         ├── SceneBehaviour  the scene's own logic
         └── Node            one thing in the scene: a player, a crate, a light, a UI layer
-            ├── properties  its data: Transform3D, Mesh, Physics, Light, ...
+            ├── properties  its data: Transform3D, Mesh, RigidBodyBuilder, Colliders, Light, ...
             ├── behaviours  its logic: your own structs, with update hooks
             └── children    other nodes that follow it
 ```
@@ -217,8 +217,8 @@ A node is **an id plus whatever you put on it**. It has no fixed type: a light i
 let crate_node = Node::new("crate_1")                           // a unique id in the scene
     .with_property(Transform3D { position, ..Default::default() })
     .with_property(Mesh::cube())
-    .with_property(Physics::dynamic(20.0)
-        .collider(ColliderBuilder::cuboid(0.5, 0.5, 0.5)))   // Rapier's own collider (see docs/colliders.md)
+    .with_property(RigidBodyBuilder::dynamic())                       // Rapier's body (see docs/colliders.md)
+    .with_property(Colliders::new().add(ColliderBuilder::cuboid(0.5, 0.5, 0.5).mass(20.0)))   // and its colliders
     .with_behavior(Breakable { hits_left: 3 });
 ```
 
@@ -240,7 +240,7 @@ A node has **at most one property of each type**. Adding a second `Mesh` replace
 
 ## Properties
 
-A property is **plain data** on a node. Engine systems read them: the renderer draws every node with a `Mesh`, physics simulates every node with `Physics`, and so on. You reach them all the same way, by type:
+A property is **plain data** on a node. Engine systems read them: the renderer draws every node with a `Mesh`, physics simulates every node with a `RigidBodyBuilder` or `Colliders`, and so on. You reach them all the same way, by type:
 
 ```rust
 if let Some(transform) = node.get_property_mut::<Transform3D>() {
@@ -256,7 +256,8 @@ if let Some(transform) = node.get_property_mut::<Transform3D>() {
 | `Transform2D` | A position, rotation, scale and z index on the 2D plane (screen units). A node has one transform or the other, never both. |
 | `Mesh` | One piece of geometry with one material: `Mesh::cube()`, `plane`, `sphere`, `cylinder`, `capsule`, `custom(name)` |
 | `Model` | A 3D object made of named parts: from a file (`Model::file("models/ship.glb")`), from meshes, or both |
-| `Physics` | A rigid body and its colliders: `Physics::dynamic(mass).collider(ColliderBuilder::..)`, shapes from a model's meshes with `Collider::from_model` |
+| `RigidBodyBuilder` | Rapier's rigid body, as a property: `RigidBodyBuilder::dynamic()`, `fixed()`, `kinematic_position_based()` (follows its node) |
+| `Colliders` | Its colliders: `Colliders::new().add(ColliderBuilder::..)`, shapes from a model's meshes with `Collider::from_model`, trigger zones with `.sensor(true)` and `.detects([..])`. Without a body: static, or following the node if all are sensors |
 | `CameraLens` | Makes the node a camera (field of view, near plane). A scene without one gets a default camera. |
 | `LookAt` | Turns the node to face another node every frame |
 | `Light` | The sun: `Light::directional(color)`, shining along the node's +Z |
@@ -457,7 +458,7 @@ let ship = Node::new("ship")
 - **A child's id is `"parent/child"`**: `"ship/engine_glow"`. Reach it with `scene.child("ship", "engine_glow")`.
 - **A child with no transform of its own sits right at its parent.**
 - `.follow_position_only()` makes the child follow the parent's position but not its rotation. `.global()` makes it stay where it is in the world (still removed with its parent).
-- A child with a `Physics` body is moved by physics, not by its parent.
+- A child with a `RigidBodyBuilder` is moved by physics, not by its parent - unless it's kinematic position-based, which follows its node wherever the parent takes it.
 - 2D works the same with `Transform2D`.
 
 ---
@@ -534,7 +535,7 @@ In-depth docs, in [docs/](docs/):
 
 - [scene_loading.md](docs/scene_loading.md): preloading and switching scenes, splash and loading screens
 - [meshes_and_models.md](docs/meshes_and_models.md): `Mesh`, `Model`, parts and materials
-- [colliders.md](docs/colliders.md): bodies and colliders (Rapier's `ColliderBuilder`), shapes from a model's meshes, `Meshes`, `.each()`, hiding collision meshes, sensors
+- [colliders.md](docs/colliders.md): bodies and colliders (Rapier's builders), mass, kinematic bodies, shapes from a model's meshes, `Meshes`, `.each()`, hiding collision meshes, sensors
 - [shapes_and_lines.md](docs/shapes_and_lines.md): `Line`, `Shape2D`, 2D `Text`
 - [sign_glass.md](docs/sign_glass.md): a custom shader drawing a sign seen only through a glass
 - [animation_tracks.md](docs/animation_tracks.md): animation

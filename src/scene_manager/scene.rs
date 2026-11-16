@@ -40,7 +40,7 @@ pub struct FrameContext<'a> {
 pub struct SceneContent {
     pub nodes: SceneNodes,
     pub(crate) renderizable_instances: HashMap<String, InstanceData>,
-    // Every node spawned with a Physics property (see
+    // Every node spawned with a body - a RigidBodyBuilder or Colliders (see
     // engine::scene_manager::physics_bridge) while the scene is built - made
     // into bodies when its physics starts (see Scene::start_physics). One
     // spawned after that gets its body right away.

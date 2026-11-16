@@ -36,7 +36,7 @@ pub mod asset_manager {
 pub use egui;
 pub use nalgebra;
 /// Rapier's own types, at the engine's version - for colliders
-/// (`Physics::collider(ColliderBuilder::..)`) and `app.physics.body_mut`.
+/// (`RigidBodyBuilder`, `ColliderBuilder`) and `app.physics.body_mut`.
 pub use rapier3d;
 pub use sdl2;
 
@@ -49,9 +49,9 @@ pub mod prelude {
     pub use crate::asset_manager::{AssetManager, CollisionMesh, Meshes};
     pub use crate::input::input::{user_dir, Input};
     pub use crate::input::source::{Axis, Button, InputSource, Key, MouseButton};
-    pub use crate::physics::{Collider, ColliderDebug, Layers, ModelShape, Physics, RigidBodyData, Sensor};
-    /// What colliders are made of - Rapier's own (see docs/colliders.md).
-    pub use rapier3d::prelude::{CoefficientCombineRule, ColliderBuilder};
+    pub use crate::physics::{Collider, ColliderDebug, Colliders, Layers, ModelShape};
+    /// What bodies and colliders are made of - Rapier's own (see docs/colliders.md).
+    pub use rapier3d::prelude::{CoefficientCombineRule, ColliderBuilder, MassProperties, RigidBodyBuilder};
     pub use crate::scene_manager::behavior::Behavior;
     pub use crate::scene_manager::node::{Node, NodeLookup, NodeLookupMut};
     pub use crate::scene_manager::node::properties::{
@@ -96,10 +96,10 @@ pub mod physics {
     pub mod body;
     pub mod model_shape;
     pub mod physics_resources;
-    pub mod shapes;
     pub mod world;
 
-    pub use body::{Collider, ColliderDebug, Layers, Physics, RigidBodyData, Sensor};
+    pub use body::{Collider, ColliderDebug, Colliders, Layers};
+    pub use physics_resources::compute_principal_inertia;
     pub use model_shape::ModelShape;
     pub use world::{PhysicsWorld, RayHit, SensorChange, SensorEvent};
 }

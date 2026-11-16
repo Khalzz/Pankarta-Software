@@ -1,24 +1,25 @@
-//! A node's physics description - its `Physics` property: the body and its
-//! colliders (see scene_manager::physics_bridge, docs/colliders.md).
+//! A node's physics: Rapier's `RigidBodyBuilder` as a property, and its
+//! `Colliders` - Rapier's `ColliderBuilder`s, with the engine's extras (see
+//! scene_manager::physics_bridge, docs/colliders.md).
 
-use nalgebra::Vector3;
-use rapier3d::prelude::ColliderBuilder;
+use std::f32::consts::{FRAC_PI_2, TAU};
+
+use nalgebra::Point3;
+use rapier3d::prelude::{ColliderBuilder, RigidBodyBuilder, RigidBodyType};
 
 use crate::asset_manager::Meshes;
 use crate::physics::model_shape::{ModelPlaceholder, ModelRef, ModelShape};
 use crate::scene_manager::node::properties::Model;
 use crate::ui::color::UiColor;
 
-/// One collider on a body: Rapier's own `ColliderBuilder` - its shape,
-/// where it sits, how it touches things, anything Rapier lets a collider be
-/// - plus what only the engine knows: the layers a sensor `detects` and its
-/// `debug` look. `Physics::collider` and `Sensor::from` take a
-/// `ColliderBuilder` as it is; this is for those two extras:
+/// One collider of a node's `Colliders`: Rapier's own `ColliderBuilder` -
+/// its shape, where it sits, how it touches things - and what only the
+/// engine knows: the layers a sensor `detects` and its `debug` look (set
+/// with `Colliders::detects`/`debug`).
 ///
-///     Physics::fixed().collider(Collider::from(ColliderBuilder::cuboid(1.0, 1.0, 1.0)).debug(ColliderDebug::new()))
-///
-/// Its node's `Layers` set the builder's collision groups when the body is
-/// made - unless the builder already has groups of its own.
+/// Its `Collider::..` functions make shapes Rapier has no constructor for -
+/// from a model's meshes, a dome, a many-sided cylinder - as Rapier's own
+/// `ColliderBuilder`, for `Colliders::add`.
 #[derive(Debug, Clone)]
 pub struct Collider {
     /// Rapier's collider, as it'll be built.
@@ -36,10 +37,10 @@ impl Collider {
     /// picks - made into `shape`. Every Rapier setting chains onto it:
     ///
     ///     let table = Model::file("models/table.glb").hide_meshes(Meshes::prefix("col_"));
-    ///     Physics::dynamic(15.0)
-    ///         .collider(Collider::from_model(&table, Meshes::prefix("col_").each(), ModelShape::ConvexHull)
+    ///     Colliders::new()
+    ///         .add(Collider::from_model(&table, Meshes::prefix("col_").each(), ModelShape::ConvexHull)
     ///             .friction(0.6)
-    ///             .density(2.0))
+    ///             .mass(3.0))
     ///
     /// The file is read once, with its scene's other assets (see
     /// `app.assets.collision_meshes`). When the node spawns, the meshes -
@@ -61,40 +62,70 @@ impl Collider {
         ModelPlaceholder { model: ModelRef::Own, meshes, shape }.into_builder()
     }
 
-    /// Whether it's a trigger (Rapier's `sensor`, see `Sensor`).
+    /// Half a ball of `radius`, its flat side down on the center - a dome.
+    /// A convex hull around points on it (6 rings of 16, and the top), so
+    /// a little faceted. On the ground, a whole `ColliderBuilder::ball` -
+    /// its lower half under the floor - works the same, and exactly.
+    pub fn hemisphere(radius: f32) -> ColliderBuilder {
+        const RINGS: usize = 6;
+        const SEGMENTS: usize = 16;
+        let mut points = vec![Point3::new(0.0, radius, 0.0)];
+        for ring in 0..RINGS {
+            // From the flat edge (0) up to just under the top.
+            let (rise, out) = (ring as f32 / RINGS as f32 * FRAC_PI_2).sin_cos();
+            for segment in 0..SEGMENTS {
+                let (sin, cos) = (segment as f32 / SEGMENTS as f32 * TAU).sin_cos();
+                points.push(Point3::new(cos * out, rise, sin * out) * radius);
+            }
+        }
+        hull(&points)
+    }
+
+    /// A standing cylinder with `sides` flat sides (3 or more) instead of a
+    /// perfectly round one - a prism, like Blender's cylinder (32 sides by
+    /// default there, Radius 1, Depth 2: `cylinder_with_sides(1.0, 1.0, 32)`).
+    /// Rapier's own `ColliderBuilder::cylinder` is exactly round.
+    pub fn cylinder_with_sides(half_height: f32, radius: f32, sides: usize) -> ColliderBuilder {
+        let sides = sides.max(3);
+        let mut points = Vec::with_capacity(sides * 2);
+        for side in 0..sides {
+            let (sin, cos) = (side as f32 / sides as f32 * TAU).sin_cos();
+            for y in [-half_height, half_height] {
+                points.push(Point3::new(cos * radius, y, sin * radius));
+            }
+        }
+        hull(&points)
+    }
+
+    /// Whether it's a trigger (Rapier's `sensor`).
     pub fn is_sensor(&self) -> bool {
         self.builder.is_sensor
     }
+}
 
-    /// For a sensor: detects only nodes in one of `layers` (see `Layers`).
-    pub fn detects<S: Into<String>>(mut self, layers: impl IntoIterator<Item = S>) -> Self {
-        self.detects = layers.into_iter().map(Into::into).collect();
-        self
-    }
-
-    /// Draws this collider in the world as `debug` says - just this one,
-    /// with no debug view on.
-    pub fn debug(mut self, debug: ColliderDebug) -> Self {
-        self.debug = Some(debug);
-        self
-    }
+/// The convex hull around `points` - an empty ball for a size of 0, whose
+/// points have no hull.
+fn hull(points: &[Point3<f32>]) -> ColliderBuilder {
+    ColliderBuilder::convex_hull(points).unwrap_or_else(|| ColliderBuilder::ball(0.0))
 }
 
 impl From<ColliderBuilder> for Collider {
-    /// Rapier's collider as it is.
+    /// Rapier's collider as it is, with none of the engine's extras.
     fn from(builder: ColliderBuilder) -> Self {
         Self { builder, detects: Vec::new(), debug: None }
     }
 }
 
-/// How one collider is drawn for debugging (see `Collider::debug`,
-/// `Sensor::debug`): its edges and its faces, each in a color of its own or
-/// not at all - over everything, so it shows through walls. A sensor with
-/// something inside it uses the `occupied_` colors.
+/// How one collider is drawn for debugging (see `Colliders::debug`): its
+/// edges and its faces, each in a color of its own or not at all - over
+/// everything, so it shows through walls. A sensor with something inside it
+/// uses the `occupied_` colors.
 ///
-///     Sensor::from(ColliderBuilder::ball(2.0)).debug(ColliderDebug::new()
-///         .edges(UiColor::Rgb(255, 200, 0))
-///         .faces(UiColor::Rgba(255, 200, 0, 40)))
+///     Colliders::new()
+///         .add(ColliderBuilder::ball(2.0).sensor(true))
+///             .debug(ColliderDebug::new()
+///                 .edges(UiColor::Rgb(255, 200, 0))
+///                 .faces(UiColor::Rgba(255, 200, 0, 40)))
 #[derive(Debug, Clone, Copy)]
 pub struct ColliderDebug {
     pub edges: Option<UiColor>,
@@ -170,152 +201,153 @@ impl ColliderDebug {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct RigidBodyData {
-    pub is_static: bool,
-    pub mass: f32,
-    pub center_of_mass: Vector3<f32>,
-    pub initial_velocity: Vector3<f32>,
-    /// Never turns, whatever pushes it - a character standing upright.
-    pub lock_rotations: bool,
-    /// Continuous collision detection: checks the path it moves along
-    /// between steps too, so moving fast it can't pass through something
-    /// thin. Costs a little more each step.
-    pub ccd: bool,
-    /// How much of the world's gravity (`app.physics.gravity()`) it feels:
-    /// 1 all of it, 2 twice, 0 none (it floats), negative pulls it up.
-    /// Follows the world's gravity when that changes. Changed while it runs
-    /// with `app.physics.set_gravity_scale`.
-    pub gravity_scale: f32,
-}
-
-impl Default for RigidBodyData {
-    /// A moving body of 1 kg, at rest, free to turn.
-    fn default() -> Self {
-        Self { is_static: false, mass: 1.0, center_of_mass: Vector3::zeros(), initial_velocity: Vector3::zeros(), lock_rotations: false, ccd: false, gravity_scale: 1.0 }
-    }
-}
-
-impl RigidBodyData {
-    /// A body that never moves - the ground, walls.
-    pub fn fixed() -> Self {
-        Self { is_static: true, mass: 0.0, ..Default::default() }
-    }
-
-    /// A moving body of `mass` kilograms.
-    pub fn dynamic(mass: f32) -> Self {
-        Self { mass, ..Default::default() }
-    }
-}
-
-/// A node's body - its `Physics` property: a rigid body (`RigidBodyData`)
-/// and its colliders, Rapier's own (see docs/colliders.md):
+/// A node's colliders - its `Colliders` property: Rapier's
+/// `ColliderBuilder`s, added one by one, each with the engine's extras
+/// configured right after it. Its body is the node's `RigidBodyBuilder`
+/// property (see docs/colliders.md):
 ///
-///     Node::new("crate")
+///     Node::new("player")
 ///         .with_property(Transform3D::default())
-///         .with_property(Physics::dynamic(20.0)
-///             .collider(ColliderBuilder::cuboid(0.5, 0.5, 0.5).friction(0.7))
-///             .collider(Collider::from_own_model(Meshes::named(["handle"]), ModelShape::ConvexHull)))
-#[derive(Debug, Clone)]
-pub struct Physics {
-    pub(crate) rigidbody: RigidBodyData,
-    pub(crate) colliders: Vec<Collider>,
+///         .with_property(RigidBodyBuilder::dynamic().lock_rotations())
+///         .with_property(Colliders::new()
+///             .add(ColliderBuilder::capsule_y(0.5, 0.3).mass(80.0))
+///             .add(ColliderBuilder::ball(2.0).sensor(true))
+///                 .detects(["coin"]))
+///
+/// A node with colliders and no `RigidBodyBuilder` gets one of its own: a
+/// kinematic one following the node when all its colliders are sensors (a
+/// trigger zone), a fixed one otherwise (a wall, the ground).
+#[derive(Debug, Clone, Default)]
+pub struct Colliders {
+    entries: Vec<Collider>,
 }
 
-impl Physics {
-    /// A body as `rigidbody` describes it, with no colliders yet - for one
-    /// with more settings than `dynamic`/`fixed` give:
-    ///
-    ///     Physics::new(RigidBodyData { lock_rotations: true, ..RigidBodyData::dynamic(70.0) })
-    pub fn new(rigidbody: RigidBodyData) -> Self {
-        Self { rigidbody, colliders: Vec::new() }
+impl Colliders {
+    /// No colliders yet - add them with `add`.
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// A moving body of `mass` kilograms.
-    pub fn dynamic(mass: f32) -> Self {
-        Self::new(RigidBodyData::dynamic(mass))
-    }
-
-    /// A body that never moves - the ground, walls.
-    pub fn fixed() -> Self {
-        Self::new(RigidBodyData::fixed())
-    }
-
-    /// One more collider: Rapier's `ColliderBuilder` (`Collider::from_model`
-    /// gives one too), or a `Collider` with the engine's extras.
-    pub fn collider(mut self, collider: impl Into<Collider>) -> Self {
-        self.colliders.push(collider.into());
+    /// One more collider: any Rapier `ColliderBuilder` - the `Collider::..`
+    /// shapes give one too. `detects` and `debug` right after it configure
+    /// this one.
+    pub fn add(mut self, collider: ColliderBuilder) -> Self {
+        self.entries.push(Collider::from(collider));
         self
     }
 
-    /// Its rigid body's description.
-    pub fn rigidbody(&self) -> &RigidBodyData {
-        &self.rigidbody
-    }
-
-    /// Its colliders, in the order they were given.
-    pub fn colliders(&self) -> &[Collider] {
-        &self.colliders
-    }
-}
-
-/// A node's trigger zone - its `Sensor` property: a shape that detects the
-/// nodes with a body overlapping it, and stops nothing. Its node's behaviors
-/// hear about them in `Behavior::on_sensor_enter`/`on_sensor_exit`, and
-/// `app.physics.entered(..)`/`exited(..)`/`inside(..)` tell anyone else.
-///
-/// On a node without `Physics` it follows the node's `Transform3D` - a zone
-/// that stays put, moves with its parent or is moved by hand. On a node with
-/// `Physics` it's one more collider on that body - a pickup radius around a
-/// player.
-///
-/// It detects moving bodies (and ones held still by an animation) - not
-/// static ones (the ground, walls).
-///
-///     Node::new("coin")
-///         .with_property(Transform3D { position, ..Default::default() })
-///         .with_property(Sensor::from(ColliderBuilder::ball(1.0)).detects(["player"]))
-///         .with_behavior(Coin);
-#[derive(Debug, Clone)]
-pub struct Sensor {
-    pub collider: Collider,
-}
-
-impl From<ColliderBuilder> for Sensor {
-    /// A zone of Rapier's collider - any shape, `Collider::from_model`'s too
-    /// - made a sensor:
-    ///
-    ///     Sensor::from(ColliderBuilder::ball(1.5).translation(Vector3::y() * 1.5))
-    ///     Sensor::from(Collider::from_own_model(Meshes::all(), ModelShape::ConvexHull))
-    fn from(builder: ColliderBuilder) -> Self {
-        Self { collider: Collider::from(builder.sensor(true)) }
-    }
-}
-
-impl Sensor {
-    /// Detects only nodes in one of `layers` (see `Layers`) - every node
-    /// with a body by default.
+    /// The collider just added, if it's a sensor, detects only nodes in one
+    /// of `layers` (see `Layers`) - every node with a body by default.
     pub fn detects<S: Into<String>>(mut self, layers: impl IntoIterator<Item = S>) -> Self {
-        self.collider = self.collider.detects(layers);
+        match self.entries.last_mut() {
+            Some(collider) => collider.detects = layers.into_iter().map(Into::into).collect(),
+            None => eprintln!("Colliders::detects before any collider was added - `add` one first"),
+        }
         self
     }
 
-    /// Draws its area as `debug` says (`ColliderDebug::new()` for the
-    /// default look) - with no debug view on.
+    /// The collider just added is drawn as `debug` says
+    /// (`ColliderDebug::new()` for the default look) - with no debug view on.
     pub fn debug(mut self, debug: ColliderDebug) -> Self {
-        self.collider = self.collider.debug(debug);
+        match self.entries.last_mut() {
+            Some(collider) => collider.debug = Some(debug),
+            None => eprintln!("Colliders::debug before any collider was added - `add` one first"),
+        }
         self
     }
+
+    /// Every collider, in the order they were added.
+    pub fn iter(&self) -> impl Iterator<Item = &Collider> {
+        self.entries.iter()
+    }
+
+    /// Every collider's Rapier builder, in the order they were added - for
+    /// `compute_principal_inertia`.
+    pub fn builders(&self) -> impl Iterator<Item = &ColliderBuilder> {
+        self.entries.iter().map(|collider| &collider.builder)
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub(crate) fn into_entries(self) -> Vec<Collider> {
+        self.entries
+    }
+}
+
+/// The body a node with `colliders` and no `RigidBodyBuilder` of its own
+/// gets: kinematic, following the node, when every one is a sensor (a
+/// trigger zone); fixed otherwise.
+pub(crate) fn implied_body(colliders: &[Collider]) -> RigidBodyBuilder {
+    if !colliders.is_empty() && colliders.iter().all(Collider::is_sensor) {
+        RigidBodyBuilder::kinematic_position_based()
+    } else {
+        RigidBodyBuilder::fixed()
+    }
+}
+
+/// Whether a body of `body`'s kind follows its node's `Transform3D` - a
+/// kinematic position-based one.
+pub(crate) fn follows_node(body: &RigidBodyBuilder) -> bool {
+    body.body_type == RigidBodyType::KinematicPositionBased
 }
 
 /// What a node with a body is, for sensors - its `Layers` property:
-/// `Layers::new(["player"])`, and a `Sensor` that `detects(["player"])`
-/// sees it. A node can be in several. Up to 31 different names a game.
+/// `Layers::new(["player"])`, and a sensor collider that
+/// `detects(["player"])` sees it. A node can be in several. Up to 31 different names a game.
 #[derive(Debug, Clone, Default)]
 pub struct Layers(pub Vec<String>);
 
 impl Layers {
     pub fn new<S: Into<String>>(layers: impl IntoIterator<Item = S>) -> Self {
         Self(layers.into_iter().map(Into::into).collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn engine_shapes_are_their_size() {
+        let dome = Collider::hemisphere(2.0).shape.compute_local_aabb();
+        assert!((dome.maxs.y - 2.0).abs() < 1e-4 && dome.mins.y.abs() < 1e-4);
+        let prism = Collider::cylinder_with_sides(1.0, 0.5, 6).shape;
+        assert_eq!(prism.as_convex_polyhedron().expect("a convex hull").points().len(), 12);
+    }
+
+    #[test]
+    fn kinematic_bodies_follow_their_node() {
+        assert!(follows_node(&RigidBodyBuilder::kinematic_position_based()));
+        assert!(!follows_node(&RigidBodyBuilder::dynamic()));
+        assert!(!follows_node(&RigidBodyBuilder::kinematic_velocity_based()));
+    }
+
+    #[test]
+    fn extras_configure_the_collider_just_added() {
+        let colliders = Colliders::new()
+            .add(ColliderBuilder::capsule_y(0.5, 0.3))
+            .add(ColliderBuilder::ball(2.0).sensor(true))
+                .detects(["coin"])
+                .debug(ColliderDebug::new());
+        let entries: Vec<&Collider> = colliders.iter().collect();
+        assert!(entries[0].detects.is_empty() && entries[0].debug.is_none());
+        assert_eq!(entries[1].detects, vec!["coin".to_owned()]);
+        assert!(entries[1].debug.is_some());
+        // Before any collider: nothing to configure, nothing breaks.
+        assert!(Colliders::new().detects(["x"]).is_empty());
+    }
+
+    #[test]
+    fn a_node_without_a_body_gets_one_from_its_colliders() {
+        let zone = Colliders::new().add(ColliderBuilder::ball(1.0).sensor(true)).into_entries();
+        assert!(follows_node(&implied_body(&zone)));
+        let wall = Colliders::new().add(ColliderBuilder::cuboid(1.0, 1.0, 1.0)).add(ColliderBuilder::ball(1.0).sensor(true)).into_entries();
+        assert_eq!(implied_body(&wall).body_type, RigidBodyType::Fixed);
     }
 }

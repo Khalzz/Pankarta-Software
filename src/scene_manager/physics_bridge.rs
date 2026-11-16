@@ -1,13 +1,17 @@
 use crate::asset_manager::collision::{self, CollisionMeshCache};
 use crate::physics::model_shape::{ModelPlaceholder, ModelRef};
-use crate::physics::{Collider, Layers, Physics, RigidBodyData, Sensor};
+use rapier3d::prelude::RigidBodyBuilder;
+
+use crate::physics::body::{self, Colliders};
+use crate::physics::{Collider, Layers};
 use crate::scene_manager::node::Node;
 use crate::scene_manager::node::properties::Model;
 use crate::physics::physics_resources::PhysicsObjectDef;
 
 use super::scene::Scene;
 
-/// Bridges a spawned `Node`'s `Transform3D`+`Physics` properties into a
+/// Bridges a spawned `Node`'s `Transform3D`, `RigidBodyBuilder` and
+/// `Colliders` properties into a
 /// `PhysicsObjectDef` - what its body is made from (see that type) - on
 /// `SceneContent::physics_bodies`, until the scene's physics starts or, once
 /// it has, the node's spawn hands it on (see `Scene::spawn_one`). Mirrors
@@ -25,42 +29,47 @@ use super::scene::Scene;
 /// same id later - a body's starting position/mass/colliders are only read
 /// once, when it's made; from then on the body is where it is.
 ///
-/// A node's `Sensor` is one more collider on its body - or, without
-/// `Physics`, its whole body, one that follows the node.
+/// A node with colliders and no `RigidBodyBuilder` gets the body they imply
+/// (see `body::implied_body`); one with a body and no colliders, just the
+/// body.
 pub fn register_physics_body(scene: &mut Scene, id: &str, meshes: &mut CollisionMeshCache) -> Result<(), String> {
     let node = scene.content.nodes.get(id).ok_or_else(|| format!("no node named '{id}' to register"))?;
     let transform = *node.transform_3d().ok_or_else(|| format!("node '{id}' has no Transform3D property"))?;
-    let sensor = node.get_property::<Sensor>();
-    let follows_node = node.get_property::<Physics>().is_none();
-    let mut physics = match node.get_property::<Physics>() {
-        Some(physics) => physics.clone(),
-        None if sensor.is_some() => Physics::new(RigidBodyData::default()),
-        None => return Err(format!("node '{id}' has no Physics or Sensor property")),
-    };
-    physics.colliders.extend(sensor.map(|sensor| sensor.collider.clone()));
+    if !has_body(node) {
+        return Err(format!("node '{id}' has no RigidBodyBuilder or Colliders property"));
+    }
+    let entries = node.get_property::<Colliders>().cloned().unwrap_or_default().into_entries();
+    let body = node.get_property::<RigidBodyBuilder>().cloned().unwrap_or_else(|| body::implied_body(&entries));
+    let follows_node = body::follows_node(&body);
     let layers = node.get_property::<Layers>().map(|layers| layers.0.clone()).unwrap_or_default();
 
     let own_model = node.get_property::<Model>().and_then(|model| Some((model.file_path()?.to_owned(), model.transform)));
-    physics.colliders = physics.colliders.into_iter()
+    let colliders = entries.into_iter()
         .flat_map(|collider| resolve_collider(collider, transform.scale, id, own_model.as_ref(), meshes))
         .collect();
 
-    scene.content.physics_bodies.push(PhysicsObjectDef { id: id.to_owned(), position: transform.position, rotation: transform.rotation, physics, layers, follows_node });
+    scene.content.physics_bodies.push(PhysicsObjectDef { id: id.to_owned(), position: transform.position, rotation: transform.rotation, body, colliders, layers, follows_node });
 
     Ok(())
 }
 
-/// Whether `node` gets a body - it has `Physics` or a `Sensor`.
+/// Whether `node` gets a body - it has a `RigidBodyBuilder` or `Colliders`.
 pub(crate) fn has_body(node: &Node) -> bool {
-    node.get_property::<Physics>().is_some() || node.get_property::<Sensor>().is_some()
+    node.get_property::<RigidBodyBuilder>().is_some() || node.get_property::<Colliders>().is_some()
+}
+
+/// Whether physics moves `node` - its own `RigidBodyBuilder` is dynamic,
+/// fixed or velocity-based - so its parent doesn't. A kinematic
+/// position-based one, or colliders with no body, follow the node instead.
+pub(crate) fn moved_by_physics(node: &Node) -> bool {
+    node.get_property::<RigidBodyBuilder>().is_some_and(|body| !body::follows_node(body))
 }
 
 /// Every model file `node`'s colliders read meshes from - for the scene's
 /// loading step to read ahead.
 pub(crate) fn collision_mesh_paths(node: &Node) -> Vec<&str> {
-    let physics = node.get_property::<Physics>().map(Physics::colliders).unwrap_or_default();
-    let sensor = node.get_property::<Sensor>().map(|sensor| &sensor.collider);
-    physics.iter().chain(sensor).filter_map(|collider| match &ModelPlaceholder::of(&collider.builder)?.model {
+    let colliders = node.get_property::<Colliders>().into_iter().flat_map(Colliders::iter);
+    colliders.filter_map(|collider| match &ModelPlaceholder::of(&collider.builder)?.model {
         ModelRef::File { path, .. } => Some(path.as_str()),
         ModelRef::Own => node.get_property::<Model>().and_then(Model::file_path),
         ModelRef::NoFile => None,

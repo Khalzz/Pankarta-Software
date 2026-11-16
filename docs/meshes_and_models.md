@@ -49,6 +49,27 @@ Mesh::profile_shape(32).ring(0.0, 1.0).ring(2.0, 0.5)
 Mesh::profile_shape(24).ring(0.0, 0.2).ring(0.1, 0.3).ring(0.45, 0.32).ring(0.8, 0.12).ring(1.0, 0.18)
 ```
 
+### Bending and flattening a profile
+
+Two more settings change the ring added just before them:
+- **`.offset(x, z)`** moves the ring's middle off the Y axis. Rings moved further and further one way **bend** the shape that way.
+- **`.stretch(x, z)`** makes the ring an **oval**: `x` times as wide along X, `z` times along Z. `1.0, 1.0` is round.
+
+```rust
+// A jet's nose: drooping to its tip, flatter than it's wide near its base.
+// Built along Y, then laid forward with the node's rotation (-90° around X,
+// which turns its local Z up, so a negative z offset droops).
+Mesh::profile_shape(24)
+    .ring(0.0, 0.6).stretch(1.0, 0.85)
+    .ring(0.8, 0.48).offset(0.0, -0.03).stretch(1.0, 0.85)
+    .ring(1.6, 0.3).offset(0.0, -0.12).stretch(1.0, 0.95)
+    .ring(2.2, 0.0).offset(0.0, -0.3)
+```
+
+A ring with neither is round and on the axis. Each face is lit as it actually faces, so bent and oval bands shade correctly.
+
+### Profile details
+
 - **Heights are from the node.** They aren't centered, so a profile starting at 0 stands on its node's position.
 - **A radius of 0 is a point.** Two rings at the same height make a flat step.
 - **Ends:** the first and last rings get flat caps, unless they're points.

@@ -10,6 +10,7 @@ use crate::asset_manager::gltf::{load_model_with, DoubleSided};
 use crate::asset_manager::normalize;
 use crate::asset_manager::primitives::{build_capsule_mesh, build_cube_mesh, build_cylinder_mesh, build_cylinder_shape_mesh, build_mesh_model, build_plane_mesh, build_profile_shape_mesh, build_sphere_mesh};
 use crate::rendering::instance_management::ModelDataInstance;
+use crate::scene_manager::node::properties::ProfileRing;
 use crate::rendering::models::model::{Mesh, Model, ModelVertex};
 
 /// Every model in memory, by key (see ModelSource::key).
@@ -66,7 +67,7 @@ pub(crate) enum ModelSource {
     Capsule { radius: f32, height: f32 },
     /// Its own geometry for each profile: scaling one would tilt its sides'
     /// lighting wrong.
-    ProfileShape { rings: Vec<(f32, f32)>, sides: u32 },
+    ProfileShape { rings: Vec<ProfileRing>, sides: u32 },
 }
 
 impl ModelSource {
@@ -82,7 +83,10 @@ impl ModelSource {
             Self::CylinderShape { sides } => format!("engine:cylinder_shape:{sides}"),
             Self::Capsule { radius, height } => format!("engine:capsule:{radius}:{height}"),
             Self::ProfileShape { rings, sides } => {
-                let rings: Vec<String> = rings.iter().map(|(height, radius)| format!("{height}:{radius}")).collect();
+                let rings: Vec<String> = rings
+                    .iter()
+                    .map(|ring| format!("{}:{}:{}:{}:{}:{}", ring.height, ring.radius, ring.offset.0, ring.offset.1, ring.stretch.0, ring.stretch.1))
+                    .collect();
                 format!("engine:profile_shape:{sides}:{}", rings.join(","))
             }
         }
@@ -131,7 +135,7 @@ enum LoadGeometry {
     Cylinder,
     CylinderShape(u32),
     Capsule(f32, f32),
-    ProfileShape(Vec<(f32, f32)>, u32),
+    ProfileShape(Vec<ProfileRing>, u32),
 }
 
 impl ModelLoad {

@@ -21,7 +21,7 @@ pub use light::{Light, LightKind};
 pub use line::{Line, LinePoint, LineSpace};
 pub use look_at::LookAt;
 pub use material::{Material, TextureSpace};
-pub use mesh::{Mesh, MeshShape};
+pub use mesh::{Mesh, MeshShape, ProfileRing};
 pub use model::{Model, ModelMesh};
 pub use origin_anchor::OriginAnchor;
 pub use parent::{Parent, Space};

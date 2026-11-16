@@ -208,8 +208,27 @@ impl WalkingScene {
             ModelShape::ConvexDecomposition,
             4.0,
         );
+        // A jet's nose, laid forward (its Y toward -Z, its Z up): each
+        // ring's offset droops it toward its tip (a negative z is down) and
+        // its stretch makes it flatter than it's wide. It bulges everywhere,
+        // so its convex hull fits it. Fixed in place.
+        let nose = Node::new("nose")
+            .with_property(Transform3D {
+                position: Vector3::new(11.0, 0.7, -28.0),
+                rotation: UnitQuaternion::from_axis_angle(&Vector3::x_axis(), -std::f32::consts::FRAC_PI_2),
+                ..Default::default()
+            })
+            .with_property(
+                Mesh::profile_shape(24)
+                    .ring(0.0, 0.6).stretch(1.0, 0.85)
+                    .ring(0.8, 0.48).offset(0.0, -0.03).stretch(1.0, 0.85)
+                    .ring(1.6, 0.3).offset(0.0, -0.12).stretch(1.0, 0.95)
+                    .ring(2.2, 0.0).offset(0.0, -0.3)
+                    .material(Material::standard().color(UiColor::Rgb(150, 155, 165))),
+            )
+            .with_property(Colliders::new().add(Collider::from_own_mesh(ModelShape::ConvexHull)));
 
-        let mut nodes = vec![ground, player, plane, toy_jet, barrel, stool, traffic_cone, bucket, vase, sun, glass];
+        let mut nodes = vec![ground, player, plane, toy_jet, barrel, stool, traffic_cone, bucket, vase, nose, sun, glass];
         // Sensors of every shape, outside the cubes - see sensor_gallery.rs.
         nodes.extend(sensor_gallery());
 

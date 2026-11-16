@@ -12,7 +12,7 @@ use wgpu::util::DeviceExt;
 use crate::asset_manager::models::{MeshData, ModelGeometry, ModelSource};
 use crate::rendering::models::model::{self, Model, ModelVertex};
 use crate::rendering::models::textures::Texture;
-use crate::scene_manager::node::properties::Transform3D;
+use crate::scene_manager::node::properties::{ProfileRing, Transform3D};
 
 /// Builds a `Cube`'s raw geometry - 4 vertices per face (24 total) rather
 /// than 8 shared ones, since each face needs its own flat normal/UV, which a
@@ -189,64 +189,67 @@ pub(crate) fn build_cylinder_shape_mesh(sides: u32) -> (Vec<ModelVertex>, Vec<u3
     (vertices, indices)
 }
 
-/// A shape turned around Y through `rings` - (height, radius), bottom to
-/// top - with `sides` flat sides. Each band between two rings is its own
-/// flat faces, lit leaning as the band does (out, up where it narrows, down
-/// where it widens, straight up on a step); the first ring is capped facing
+/// A shape turned around Y through `rings`, bottom to top, with `sides`
+/// flat sides (see `Mesh::profile_shape`). Each face between two rings is
+/// lit as it actually faces - out and leaning as the band narrows, widens,
+/// steps or bends with the rings' offsets; the first ring is capped facing
 /// down and the last facing up, unless they're points. Corners are at angles
 /// 0, 1/sides, 2/sides... of a turn; heights are as given, not centered.
-pub(crate) fn build_profile_shape_mesh(rings: &[(f32, f32)], sides: u32) -> (Vec<ModelVertex>, Vec<u32>) {
+pub(crate) fn build_profile_shape_mesh(rings: &[ProfileRing], sides: u32) -> (Vec<ModelVertex>, Vec<u32>) {
     let sides = sides.max(3);
-    let at = |side: u32| (side as f32 / sides as f32 * std::f32::consts::TAU).sin_cos();
+    let angle = |side: u32| side as f32 / sides as f32 * std::f32::consts::TAU;
     // How far along the outline each ring is, for the texture's v.
     let mut along = vec![0.0];
     for pair in rings.windows(2) {
-        let ((y0, r0), (y1, r1)) = (pair[0], pair[1]);
-        along.push(along.last().unwrap() + ((y1 - y0).powi(2) + (r1 - r0).powi(2)).sqrt());
+        let step = pair[1].point(0.0) - pair[0].point(0.0);
+        along.push(along.last().unwrap() + step.norm());
     }
     let length = along.last().copied().unwrap_or(0.0).max(1e-6);
     let (mut vertices, mut indices) = (Vec::new(), Vec::new());
     for (band, pair) in rings.windows(2).enumerate() {
-        let ((y0, r0), (y1, r1)) = (pair[0], pair[1]);
-        if r0 <= 0.0 && r1 <= 0.0 || (y0 == y1 && r0 == r1) {
-            continue; // No area: along the middle, or the same ring twice.
+        let (low, high) = (&pair[0], &pair[1]);
+        if low.is_point() && high.is_point() || low == high {
+            continue; // No area: a line, or the same ring twice.
         }
         let (v0, v1) = (1.0 - along[band] / length, 1.0 - along[band + 1] / length);
         for side in 0..sides {
-            let ((s0, c0), (s1, c1)) = (at(side), at(side + 1));
-            // Out of the face's middle (r cos(pi/sides) from the axis),
-            // turned as the band runs from ring to ring.
-            let (sin, cos) = ((side as f32 + 0.5) / sides as f32 * std::f32::consts::TAU).sin_cos();
-            let lean = (r0 - r1) * (std::f32::consts::PI / sides as f32).cos();
-            let n = Vector3::new(cos * (y1 - y0), lean, sin * (y1 - y0)).try_normalize(1e-9).unwrap_or_else(Vector3::y);
+            let corners = [high.point(angle(side)), high.point(angle(side + 1)), low.point(angle(side + 1)), low.point(angle(side))];
+            // Newell's normal: the face's own, even with a corner pinched to
+            // a point - counter-clockwise seen from outside, as wound below.
+            let mut n = Vector3::zeros();
+            for (index, here) in corners.iter().enumerate() {
+                let next = corners[(index + 1) % 4];
+                n += Vector3::new((here.y - next.y) * (here.z + next.z), (here.z - next.z) * (here.x + next.x), (here.x - next.x) * (here.y + next.y));
+            }
+            let n = n.try_normalize(1e-12).unwrap_or_else(Vector3::y);
             let normal = [n.x, n.y, n.z];
             let (u0, u1) = (side as f32 / sides as f32, (side + 1) as f32 / sides as f32);
             let base = vertices.len() as u32;
-            vertices.push(ModelVertex { position: [c0 * r1, y1, s0 * r1], tex_coords: [u0, v1], normal });
-            vertices.push(ModelVertex { position: [c0 * r0, y0, s0 * r0], tex_coords: [u0, v0], normal });
-            vertices.push(ModelVertex { position: [c1 * r0, y0, s1 * r0], tex_coords: [u1, v0], normal });
-            vertices.push(ModelVertex { position: [c1 * r1, y1, s1 * r1], tex_coords: [u1, v1], normal });
-            // Counter-clockwise seen from outside; a pointed ring's
-            // triangle has no area, so it's left out.
-            if r1 > 0.0 {
+            let [high0, high1, low1, low0] = corners;
+            vertices.push(ModelVertex { position: high0.into(), tex_coords: [u0, v1], normal });
+            vertices.push(ModelVertex { position: low0.into(), tex_coords: [u0, v0], normal });
+            vertices.push(ModelVertex { position: low1.into(), tex_coords: [u1, v0], normal });
+            vertices.push(ModelVertex { position: high1.into(), tex_coords: [u1, v1], normal });
+            // A pointed ring's triangle has no area, so it's left out.
+            if !high.is_point() {
                 indices.extend_from_slice(&[base, base + 3, base + 2]);
             }
-            if r0 > 0.0 {
+            if !low.is_point() {
                 indices.extend_from_slice(&[base, base + 2, base + 1]);
             }
         }
     }
-    let ends = [rings.first().map(|&(y, r)| (y, r, false)), rings.last().map(|&(y, r)| (y, r, true))];
-    for (y, radius, up) in ends.into_iter().flatten() {
-        if radius <= 0.0 || rings.len() < 2 {
+    let ends = [rings.first().map(|ring| (ring, false)), rings.last().map(|ring| (ring, true))];
+    for (ring, up) in ends.into_iter().flatten() {
+        if ring.is_point() || rings.len() < 2 {
             continue;
         }
         let normal = [0.0, if up { 1.0 } else { -1.0 }, 0.0];
         let center = vertices.len() as u32;
-        vertices.push(ModelVertex { position: [0.0, y, 0.0], tex_coords: [0.5, 0.5], normal });
+        vertices.push(ModelVertex { position: ring.middle().into(), tex_coords: [0.5, 0.5], normal });
         for side in 0..sides {
-            let (sin, cos) = at(side);
-            vertices.push(ModelVertex { position: [cos * radius, y, sin * radius], tex_coords: [0.5 + cos * 0.5, 0.5 + sin * 0.5], normal });
+            let (sin, cos) = angle(side).sin_cos();
+            vertices.push(ModelVertex { position: ring.point(angle(side)).into(), tex_coords: [0.5 + cos * 0.5, 0.5 + sin * 0.5], normal });
         }
         for side in 0..sides {
             let (here, next) = (center + 1 + side, center + 1 + (side + 1) % sides);
@@ -423,16 +426,53 @@ mod tests {
         assert!(!triangles.is_empty());
         assert!(collision_geometry(&ModelSource::Mesh("never added".to_owned()), &custom).is_none());
         // A pointed cone: its corners around the bottom, and the tip.
-        let (points, _) = collision_geometry(&ModelSource::ProfileShape { rings: vec![(0.0, 1.0), (2.0, 0.0)], sides: 10 }, &custom).unwrap();
+        let (points, _) = collision_geometry(&ModelSource::ProfileShape { rings: plain(&[(0.0, 1.0), (2.0, 0.0)]), sides: 10 }, &custom).unwrap();
         let hull = rapier3d::prelude::SharedShape::convex_hull(&points.iter().map(|point| nalgebra::Point3::from(*point)).collect::<Vec<_>>()).unwrap();
         assert_eq!(hull.as_convex_polyhedron().unwrap().points().len(), 11);
         assert!(collision_geometry(&ModelSource::File("a.glb".to_owned()), &custom).is_none());
     }
 
+    /// Rings at (height, radius), round and on the axis.
+    fn plain(rings: &[(f32, f32)]) -> Vec<ProfileRing> {
+        rings.iter().map(|&(height, radius)| ProfileRing { height, radius, offset: (0.0, 0.0), stretch: (1.0, 1.0) }).collect()
+    }
+
+    #[test]
+    fn profile_rings_bend_with_their_offsets_and_flatten_with_their_stretch() {
+        // A nose drooping toward -Z: its tip is off the axis, and so are the
+        // faces' normals on the drooping side.
+        let mut rings = plain(&[(0.0, 0.6), (1.2, 0.35), (2.2, 0.0)]);
+        rings[1].offset = (0.0, -0.1);
+        rings[2].offset = (0.0, -0.3);
+        let (vertices, indices) = build_profile_shape_mesh(&rings, 16);
+        assert!(vertices.iter().any(|v| v.position == [0.0, 2.2, -0.3]));
+        assert!(!indices.is_empty());
+        let normal = |v: &ModelVertex| Vector3::from(v.normal);
+        assert!(vertices.iter().all(|v| (normal(v).norm() - 1.0).abs() < 1e-4));
+        // Every face's normal points out of the shape: away from the
+        // middle of its band.
+        for quad in vertices[..2 * 16 * 4].chunks_exact(4) {
+            let middle: Vector3<f32> = quad.iter().map(|v| Vector3::from(v.position)).sum::<Vector3<f32>>() / 4.0;
+            let band = if middle.y < 1.2 { 0.6 } else { 1.7 };
+            let axis = Vector3::new(0.0, middle.y, if band < 1.0 { -0.05 } else { -0.2 });
+            assert!(normal(&quad[0]).dot(&(middle - axis)) > 0.0, "a face facing in at {middle:?}");
+        }
+
+        // An oval twice as wide along X as along Z.
+        let mut rings = plain(&[(0.0, 1.0), (1.0, 1.0)]);
+        for ring in &mut rings {
+            ring.stretch = (1.0, 0.5);
+        }
+        let (vertices, _) = build_profile_shape_mesh(&rings, 16);
+        let widest = |axis: usize| vertices.iter().map(|v| v.position[axis].abs()).fold(0.0, f32::max);
+        assert!((widest(0) - 1.0).abs() < 1e-5);
+        assert!((widest(2) - 0.5).abs() < 0.02);
+    }
+
     #[test]
     fn a_profile_shape_follows_its_rings_and_lights_each_band_leaning() {
         // A tapered cup: two rings, both capped.
-        let (vertices, indices) = build_profile_shape_mesh(&[(0.0, 1.0), (2.0, 0.5)], 8);
+        let (vertices, indices) = build_profile_shape_mesh(&plain(&[(0.0, 1.0), (2.0, 0.5)]), 8);
         // 4 a side, plus a middle and 8 corners for each cap.
         assert_eq!(vertices.len(), 8 * 4 + 2 * 9);
         assert_eq!(indices.len(), 8 * 6 + 2 * 8 * 3);
@@ -443,13 +483,13 @@ mod tests {
         assert!(vertices[0].normal[1] > 0.0);
 
         // Pointed at the top: no top cap, one triangle a side.
-        let (vertices, indices) = build_profile_shape_mesh(&[(0.0, 1.0), (2.0, 0.0)], 8);
+        let (vertices, indices) = build_profile_shape_mesh(&plain(&[(0.0, 1.0), (2.0, 0.0)]), 8);
         assert_eq!(vertices.len(), 8 * 4 + 9);
         assert_eq!(indices.len(), 8 * 3 + 8 * 3);
 
         // A waist: the lower band narrows, so it faces up and out;
         // the upper band widens - down and out; a step faces straight up.
-        let (vertices, _) = build_profile_shape_mesh(&[(0.0, 1.0), (1.0, 0.5), (2.0, 1.0), (2.0, 0.6), (3.0, 0.6)], 8);
+        let (vertices, _) = build_profile_shape_mesh(&plain(&[(0.0, 1.0), (1.0, 0.5), (2.0, 1.0), (2.0, 0.6), (3.0, 0.6)]), 8);
         let band = |index: usize| vertices[index * 8 * 4].normal;
         assert!(band(0)[1] > 0.0 && band(0)[0] > 0.0);
         assert!(band(1)[1] < 0.0 && band(1)[0] > 0.0);
@@ -459,6 +499,6 @@ mod tests {
         assert!(vertices.iter().filter(|v| (v.position[1] - 1.0).abs() < 1e-5).all(|v| (radius(v) - 0.5).abs() < 1e-5));
 
         // Nothing to turn with fewer than two rings.
-        assert!(build_profile_shape_mesh(&[(0.0, 1.0)], 8).0.is_empty());
+        assert!(build_profile_shape_mesh(&plain(&[(0.0, 1.0)]), 8).0.is_empty());
     }
 }

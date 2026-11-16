@@ -244,7 +244,7 @@ A part is placed as it's drawn: by its own `transform`, then the model's, then t
 
 ### A mesh: `Collider::from_mesh`
 
-`Collider::from_mesh(&mesh, shape)` collides with **exactly the geometry a `Mesh` is drawn with**: a cube, a sphere, a flat-sided cylinder or any shape turned through rings (cones, buckets, vases: `Mesh::profile_shape`) with as many sides as you give it, or your own mesh (`app.assets.add_mesh`, used as `Mesh::custom(name)`).
+`Collider::from_mesh(&mesh, shape)` collides with **exactly the geometry a `Mesh` is drawn with**: a cube, a sphere, a flat-sided cylinder or any shape turned through rings, bent or oval as you like (cones, buckets, vases, a jet's nose: `Mesh::profile_shape`) with as many sides as you give it, or your own mesh (`app.assets.add_mesh`, used as `Mesh::custom(name)`).
 
 ```rust
 // A barrel like Blender's cylinder: Radius 0.5, Depth 1.2, 12 Vertices - drawn and colliding the same.

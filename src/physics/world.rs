@@ -28,7 +28,7 @@ use rapier3d::prelude::{
     PhysicsPipeline, QueryFilter, QueryPipeline, Ray, RigidBody, RigidBodyHandle, RigidBodySet, RigidBodyType, Shape,
 };
 
-use crate::physics::body::ColliderDebug;
+use crate::physics::body::{ColliderDebug, Outline};
 use crate::physics::physics_resources::{load_physics_from_definitions, LayerBits, PhysicsObjectDef};
 use crate::rendering::lines::{Faces, Lines};
 
@@ -100,6 +100,9 @@ pub struct PhysicsWorld {
     faces: Faces,
     /// Every collider with its own `ColliderDebug`.
     debugged: HashMap<ColliderHandle, ColliderDebug>,
+    /// Colliders drawn by lines of their own instead of their shape's
+    /// edges (see `Collider::outline`).
+    outlines: HashMap<ColliderHandle, Outline>,
     /// The bit each layer name got (see `Layers`).
     layers: LayerBits,
     /// Every node with a sensor, and the nodes overlapping it as of the
@@ -142,6 +145,7 @@ impl PhysicsWorld {
             lines: Lines::default(),
             faces: Faces::default(),
             debugged: HashMap::new(),
+            outlines: HashMap::new(),
             layers: LayerBits::default(),
             sensors: HashMap::new(),
             sensor_events: Vec::new(),
@@ -341,7 +345,7 @@ impl PhysicsWorld {
         let id = def.id.clone();
         self.remove_body(&id);
         let mut loaded = HashMap::new();
-        load_physics_from_definitions(std::slice::from_ref(&def), &mut self.colliders, &mut self.bodies, &mut loaded, &mut self.layers, &mut self.debugged);
+        load_physics_from_definitions(std::slice::from_ref(&def), &mut self.colliders, &mut self.bodies, &mut loaded, &mut self.layers, &mut self.debugged, &mut self.outlines);
         if let Some(Some(data)) = loaded.remove(&id) {
             if def.colliders.iter().any(|collider| collider.is_sensor()) {
                 self.sensors.insert(id.clone(), HashSet::new());
@@ -363,6 +367,7 @@ impl PhysicsWorld {
         if let Some(body) = self.bodies.get(handle) {
             for collider in body.colliders() {
                 self.debugged.remove(collider);
+                self.outlines.remove(collider);
             }
         }
         self.owners.remove(&handle);
@@ -520,8 +525,14 @@ impl PhysicsWorld {
                 if let Some(color) = face_color {
                     draw_faces(&mut faces, &at, collider.shape(), color);
                 }
-                if let Some(color) = edges {
-                    draw_shape(&mut lines, &at, collider.shape(), color);
+                match (edges, self.outlines.get(&collider_handle)) {
+                    (Some(color), Some(outline)) => {
+                        for [a, b] in outline.iter() {
+                            lines.line((at * a).coords, (at * b).coords, color);
+                        }
+                    }
+                    (Some(color), None) => draw_shape(&mut lines, &at, collider.shape(), color),
+                    (None, _) => {}
                 }
             }
         }
@@ -751,6 +762,23 @@ mod tests {
         world.step();
         assert_eq!(world.exited("zone").collect::<Vec<_>>(), vec!["rock"]);
         assert_eq!(world.inside("zone").count(), 0);
+    }
+
+    #[test]
+    fn a_collider_with_an_outline_draws_it_where_the_collider_is() {
+        let mut world = PhysicsWorld::new();
+        let mut colliders = Colliders::new().add(ColliderBuilder::cuboid(1.0, 1.0, 1.0)).debug(crate::physics::ColliderDebug::new()).into_entries();
+        let outline: Outline = vec![[Point3::new(0.0, 0.0, 0.0), Point3::new(0.0, 1.0, 0.0)]].into();
+        colliders[0].outline = Some(outline);
+        let mut def = def("traced", Vector3::new(5.0, 0.0, 0.0), None, Colliders::new(), &[]);
+        def.colliders = colliders;
+        world.start(vec![def]);
+        world.steps_due(0.0, false, false);
+        world.draw_colliders();
+        // Its one line, moved with its body - not the box's 12 edges.
+        let segments = world.lines().segments();
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0][0].position[0], 5.0);
     }
 
     #[test]

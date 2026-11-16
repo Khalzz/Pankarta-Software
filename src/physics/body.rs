@@ -30,7 +30,14 @@ pub struct Collider {
     /// Draws this collider, whatever debug views are on - see
     /// `ColliderDebug`.
     pub debug: Option<ColliderDebug>,
+    /// Lines its debug drawing shows in place of its shape's edges - a
+    /// profile mesh's rings traced onto it (see `model_shape::ProfileOutline`),
+    /// in its shape's own space. Set when it's read from a mesh.
+    pub(crate) outline: Option<Outline>,
 }
+
+/// Debug lines in a collider's own space (see `Collider::outline`).
+pub(crate) type Outline = std::sync::Arc<[[nalgebra::Point3<f32>; 2]]>;
 
 impl Collider {
     /// Rapier's collider shaped by `model`'s meshes - the ones `meshes`
@@ -121,7 +128,7 @@ fn hull(points: &[Point3<f32>]) -> ColliderBuilder {
 impl From<ColliderBuilder> for Collider {
     /// Rapier's collider as it is, with none of the engine's extras.
     fn from(builder: ColliderBuilder) -> Self {
-        Self { builder, detects: Vec::new(), debug: None }
+        Self { builder, detects: Vec::new(), debug: None, outline: None }
     }
 }
 

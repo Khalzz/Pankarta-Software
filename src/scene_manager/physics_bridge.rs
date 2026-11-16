@@ -1,13 +1,13 @@
 use crate::asset_manager::collision::{self, Source};
 use crate::asset_manager::primitives::collision_geometry;
 use crate::asset_manager::AssetManager;
-use crate::physics::model_shape::{ModelPlaceholder, ModelRef};
+use crate::physics::model_shape::{ModelPlaceholder, ModelRef, ProfileOutline};
 use rapier3d::prelude::RigidBodyBuilder;
 
 use crate::physics::body::{self, Colliders};
 use crate::physics::{Collider, Layers};
 use crate::scene_manager::node::Node;
-use crate::scene_manager::node::properties::{Mesh, Model, Transform3D};
+use crate::scene_manager::node::properties::{Mesh, MeshShape, Model, Transform3D};
 use crate::scene_manager::render_bridge::place;
 use crate::physics::physics_resources::PhysicsObjectDef;
 
@@ -93,6 +93,9 @@ struct Gathered {
     file: Option<(collision::FileMeshes, Transform3D)>,
     /// Each part's name, geometry, and where it's placed.
     parts: Vec<(String, Vec<nalgebra::Vector3<f32>>, Vec<[u32; 3]>, Transform3D)>,
+    /// Each part's rings, placed, if it's a `Mesh::profile_shape` - by
+    /// name, for its collider's debug drawing.
+    outlines: std::collections::HashMap<String, ProfileOutline>,
 }
 
 /// A collider read from a model or a mesh, made: its meshes read (a file's
@@ -123,7 +126,7 @@ fn resolve_collider(collider: Collider, node_scale: nalgebra::Vector3<f32>, id: 
     };
     let what = file.unwrap_or("its meshes").to_owned();
 
-    let mut gathered = Gathered { file: None, parts: Vec::new() };
+    let mut gathered = Gathered { file: None, parts: Vec::new(), outlines: Default::default() };
     if let Some(path) = file {
         match assets.collision_meshes.get_or_load(path) {
             Ok(meshes) => gathered.file = Some((meshes, place(&node, &model_transform))),
@@ -141,7 +144,13 @@ fn resolve_collider(collider: Collider, node_scale: nalgebra::Vector3<f32>, id: 
         };
         // As render_bridge::mesh_draw places a mesh in its model.
         let own_transform = Transform3D { scale: mesh.transform.scale.component_mul(&geometry_scale), ..mesh.transform };
-        gathered.parts.push((name.clone(), points, triangles, place(&node, &place(&model_transform, &own_transform))));
+        let at = place(&node, &place(&model_transform, &own_transform));
+        if let MeshShape::ProfileShape { rings, sides } = &mesh.shape {
+            // Placed as collision::pick places the mesh's points.
+            let outline = ProfileOutline::new(rings, *sides, |point| nalgebra::Point3::from(at.position + at.rotation * point.component_mul(&at.scale)));
+            gathered.outlines.insert(name.clone(), outline);
+        }
+        gathered.parts.push((name.clone(), points, triangles, at));
     }
 
     let file_sources = gathered.file.iter().flat_map(|(meshes, at)| {
@@ -152,13 +161,31 @@ fn resolve_collider(collider: Collider, node_scale: nalgebra::Vector3<f32>, id: 
     if picked.is_empty() {
         eprintln!("node '{id}': no mesh of {what} is {} - collider left out", placeholder.meshes.describe());
     }
+    // The meshes in a picked one: itself with `.each()`, every match without.
+    let file_names: Vec<&str> = gathered.file.iter().flat_map(|(meshes, _)| meshes.iter().map(|(name, _, _)| name.as_str())).collect();
+    let part_names: Vec<&str> = gathered.parts.iter().map(|(name, ..)| name.as_str()).collect();
+    let each = placeholder.meshes.is_each();
+    let in_picked = |picked: &str, name: &str| placeholder.meshes.matches(name) && (!each || name == picked);
     picked.into_iter().filter_map(|mesh| {
         let name = mesh.name.clone();
+        // Drawn by its rings if it's all profiles - nothing from the file.
+        let outline = if file_names.iter().any(|file| in_picked(&name, file)) {
+            None
+        } else {
+            part_names.iter().filter(|part| in_picked(&name, part)).try_fold(None::<ProfileOutline>, |merged, part| {
+                let outline = gathered.outlines.get(*part)?.clone();
+                Some(Some(match merged {
+                    Some(merged) => merged.merge(outline),
+                    None => outline,
+                }))
+            }).flatten()
+        };
         match placeholder.shape.build(mesh) {
             Ok(shape) => {
+                let outline = outline.map(|outline| outline.trace(shape.as_ref()).into());
                 let mut builder = collider.builder.clone();
                 builder.shape = shape;
-                Some(Collider { builder, ..collider.clone() })
+                Some(Collider { builder, outline, ..collider.clone() })
             }
             Err(error) => {
                 eprintln!("node '{id}': collider from mesh '{name}' of {what} couldn't be made ({:?}) - left out: {error}", placeholder.shape);

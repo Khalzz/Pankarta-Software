@@ -139,7 +139,7 @@ impl LayerBits {
 
 /// Seeds `collider_set`/`rigidbody_set` from the scene's `PhysicsObjectDef`s
 /// (see that type's own doc comment) - one body each, with its colliders.
-pub(crate) fn load_physics_from_definitions(defs: &[PhysicsObjectDef], collider_set: &mut ColliderSet, rigidbody_set: &mut RigidBodySet, physics_handlers: &mut HashMap<String, Option<PhysicsData>>, layers: &mut LayerBits, debugged: &mut HashMap<ColliderHandle, body::ColliderDebug>) {
+pub(crate) fn load_physics_from_definitions(defs: &[PhysicsObjectDef], collider_set: &mut ColliderSet, rigidbody_set: &mut RigidBodySet, physics_handlers: &mut HashMap<String, Option<PhysicsData>>, layers: &mut LayerBits, debugged: &mut HashMap<ColliderHandle, body::ColliderDebug>, outlines: &mut HashMap<ColliderHandle, body::Outline>) {
     for def in defs {
         // Rapier's body as the game wrote it - placed where its node is.
         let rigid_body = def.body.clone()
@@ -168,6 +168,9 @@ pub(crate) fn load_physics_from_definitions(defs: &[PhysicsObjectDef], collider_
             let handle = collider_set.insert_with_parent(builder.build(), rigidbody_handle, rigidbody_set);
             if let Some(debug) = collider_data.debug {
                 debugged.insert(handle, debug);
+            }
+            if let Some(outline) = &collider_data.outline {
+                outlines.insert(handle, outline.clone());
             }
             collider_handles.push(handle);
         }

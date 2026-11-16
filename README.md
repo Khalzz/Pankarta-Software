@@ -254,7 +254,7 @@ if let Some(transform) = node.get_property_mut::<Transform3D>() {
 |---|---|
 | `Transform3D` | A position, rotation and scale in the 3D world |
 | `Transform2D` | A position, rotation, scale and z index on the 2D plane (screen units). A node has one transform or the other, never both. |
-| `Mesh` | One piece of geometry with one material: `Mesh::cube()`, `plane`, `sphere`, `cylinder`, `cylinder_shape` (Blender-like, with a vertex count), `capsule`, `custom(name)` |
+| `Mesh` | One piece of geometry with one material: `Mesh::cube()`, `plane`, `sphere`, `cylinder`, `cylinder_shape` and `cone_shape` (Blender-like, with a vertex count), `capsule`, `custom(name)` |
 | `Model` | A 3D object made of named parts: from a file (`Model::file("models/ship.glb")`), from meshes, or both |
 | `RigidBodyBuilder` | Rapier's rigid body, as a property: `RigidBodyBuilder::dynamic()`, `fixed()`, `kinematic_position_based()` (follows its node) |
 | `Colliders` | Its colliders: `Colliders::new().add(ColliderBuilder::..)`, shapes from a model's meshes with `Collider::from_model`, trigger zones with `.sensor(true)` and `.detects([..])`. Without a body: static, or following the node if all are sensors |

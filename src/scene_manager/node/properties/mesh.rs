@@ -19,6 +19,10 @@ pub enum MeshShape {
     /// Standing along Y, with `sides` flat sides - like Blender's cylinder
     /// (its Vertices).
     CylinderShape { radius: f32, height: f32, sides: u32 },
+    /// Standing along Y, `bottom` across its bottom and `top` across its
+    /// top (radii), with `sides` flat sides - like Blender's cone (its
+    /// Radius 1, Radius 2, Depth and Vertices).
+    ConeShape { bottom: f32, top: f32, height: f32, sides: u32 },
     /// Standing along Y, `height` from tip to tip.
     Capsule { radius: f32, height: f32 },
     /// One the game added with `app.assets.add_mesh(name, ..)`.
@@ -70,6 +74,16 @@ impl Mesh {
         Self::new(MeshShape::CylinderShape { radius, height, sides: sides.max(3) })
     }
 
+    /// A cone with `sides` flat sides (3 or more), standing along Y, its
+    /// bottom `bottom` in radius and its top `top` - like Blender's cone:
+    /// Radius 1 `bottom`, Radius 2 `top`, Depth `height`, Vertices `sides`.
+    /// A `top` (or `bottom`) of 0 is pointed; the same two radii make a
+    /// cylinder, a narrower top a tapered one (a bucket, a lampshade).
+    /// Drawn with flat faces; `Collider::from_mesh` collides with exactly it.
+    pub fn cone_shape(bottom: f32, top: f32, height: f32, sides: u32) -> Self {
+        Self::new(MeshShape::ConeShape { bottom: bottom.max(0.0), top: top.max(0.0), height, sides: sides.max(3) })
+    }
+
     pub fn capsule(radius: f32, height: f32) -> Self {
         Self::new(MeshShape::Capsule { radius, height })
     }
@@ -114,6 +128,7 @@ impl Mesh {
             MeshShape::Cylinder { radius, height } => (ModelSource::Cylinder, Vector3::new(radius * 2.0, *height, radius * 2.0)),
             MeshShape::CylinderShape { radius, height, sides } => (ModelSource::CylinderShape { sides: *sides }, Vector3::new(radius * 2.0, *height, radius * 2.0)),
             MeshShape::Capsule { radius, height } => (ModelSource::Capsule { radius: *radius, height: *height }, one),
+            MeshShape::ConeShape { bottom, top, height, sides } => (ModelSource::ConeShape { bottom: *bottom, top: *top, height: *height, sides: *sides }, one),
             MeshShape::Custom(name) => (ModelSource::Mesh(name.clone()), one),
         }
     }

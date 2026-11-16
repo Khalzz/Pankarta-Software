@@ -158,7 +158,30 @@ impl WalkingScene {
                 .add(Collider::from_model(&stool_model, Meshes::all().each(), ModelShape::ConvexHull).mass(1.5)))
             .with_property(stool_model);
 
-        let mut nodes = vec![ground, player, plane, toy_jet, barrel, stool, sun, glass];
+        // Cones like Blender's (Radius 1, Radius 2, Depth, Vertices): a
+        // pointed traffic cone and a tapered bucket, each colliding with
+        // exactly its mesh.
+        let cone = |id: &str, position: Vector3<f32>, mesh: Mesh, mass: f32| {
+            Node::new(id)
+                .with_property(Transform3D { position, ..Default::default() })
+                .with_property(mesh)
+                .with_property(RigidBodyBuilder::dynamic().angular_damping(1.0))
+                .with_property(Colliders::new().add(Collider::from_own_mesh(ModelShape::ConvexHull).mass(mass)))
+        };
+        let traffic_cone = cone(
+            "traffic_cone",
+            Vector3::new(-5.0, 0.4, -30.0),
+            Mesh::cone_shape(0.3, 0.0, 0.8, 16).material(Material::standard().color(UiColor::Rgb(255, 120, 20))),
+            3.0,
+        );
+        let bucket = cone(
+            "bucket",
+            Vector3::new(5.0, 0.3, -30.0),
+            Mesh::cone_shape(0.25, 0.35, 0.6, 20).material(Material::standard().color(UiColor::Rgb(90, 140, 200))),
+            2.0,
+        );
+
+        let mut nodes = vec![ground, player, plane, toy_jet, barrel, stool, traffic_cone, bucket, sun, glass];
         // Sensors of every shape, outside the cubes - see sensor_gallery.rs.
         nodes.extend(sensor_gallery());
 

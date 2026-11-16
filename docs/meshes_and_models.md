@@ -27,11 +27,12 @@ Node::new("crate")
 | `Mesh::plane(subdivisions)` | 1 × 1 across X and Z, facing up. `subdivisions` adds vertices for shaders that move them (waves). |
 | `Mesh::sphere(radius)` | |
 | `Mesh::cylinder(radius, height)` | Standing along Y, smooth and round |
+| `Mesh::cone_shape(bottom, top, height, vertices)` | Standing along Y, `bottom` and `top` radii, with `vertices` flat sides - like Blender's cone (Radius 1, Radius 2, Depth, Vertices). A `top` of 0 is pointed; a narrower or wider top, tapered |
 | `Mesh::cylinder_shape(radius, height, vertices)` | Standing along Y, with `vertices` flat sides - like Blender's cylinder (Radius, Depth, Vertices). `Collider::from_mesh` collides with exactly it (see [colliders.md](colliders.md)) |
 | `Mesh::capsule(radius, height)` | Standing along Y, `height` from tip to tip |
 | `Mesh::custom(name)` | A mesh you added with `app.assets.add_mesh(name, vertices, indices)` |
 
-Sphere and cylinder share one loaded unit shape that's scaled to size, and so does each vertex count of `cylinder_shape`. Each capsule size gets its own geometry, because scaling a capsule would squash its round ends.
+Sphere and cylinder share one loaded unit shape that's scaled to size, and so does each vertex count of `cylinder_shape`. Each `cone_shape` size gets its own geometry, so its leaning sides are lit right. Each capsule size gets its own geometry, because scaling a capsule would squash its round ends.
 
 ### Settings
 
@@ -171,7 +172,7 @@ All examples were moved over.
 - `src/scene_manager/node/properties/mesh.rs`: `Mesh`, `MeshShape`.
 - `src/scene_manager/node/properties/model.rs`: `Model`.
 - `src/scene_manager/render_bridge.rs`: `draws(node)`, the list of instances a node draws. Spawning, the per-frame sync (adding and removing parts), material setup, scene loading and colliders all read that one list.
-- `src/asset_manager/primitives.rs`: sphere, cylinder, `cylinder_shape` and capsule geometry.
+- `src/asset_manager/primitives.rs`: sphere, cylinder, `cylinder_shape`, `cone_shape` and capsule geometry.
 - `src/shaders/materials/colored.wgsl`: engine/colored. `tiled.wgsl` has the new `color` parameter.
 
 ---

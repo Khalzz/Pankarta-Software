@@ -8,7 +8,7 @@ use wgpu::util::DeviceExt;
 use crate::app::App;
 use crate::asset_manager::gltf::{load_model_with, DoubleSided};
 use crate::asset_manager::normalize;
-use crate::asset_manager::primitives::{build_capsule_mesh, build_cube_mesh, build_cylinder_mesh, build_cylinder_shape_mesh, build_mesh_model, build_plane_mesh, build_sphere_mesh};
+use crate::asset_manager::primitives::{build_capsule_mesh, build_cube_mesh, build_cylinder_mesh, build_cone_shape_mesh, build_cylinder_shape_mesh, build_mesh_model, build_plane_mesh, build_sphere_mesh};
 use crate::rendering::instance_management::ModelDataInstance;
 use crate::rendering::models::model::{Mesh, Model, ModelVertex};
 
@@ -64,6 +64,9 @@ pub(crate) enum ModelSource {
     CylinderShape { sides: u32 },
     /// Its own geometry for each size: scaling one would squash its ends.
     Capsule { radius: f32, height: f32 },
+    /// Its own geometry for each size: scaling one would tilt its sides'
+    /// lighting wrong.
+    ConeShape { bottom: f32, top: f32, height: f32, sides: u32 },
 }
 
 impl ModelSource {
@@ -78,6 +81,7 @@ impl ModelSource {
             Self::Cylinder => "engine:cylinder".to_owned(),
             Self::CylinderShape { sides } => format!("engine:cylinder_shape:{sides}"),
             Self::Capsule { radius, height } => format!("engine:capsule:{radius}:{height}"),
+            Self::ConeShape { bottom, top, height, sides } => format!("engine:cone_shape:{bottom}:{top}:{height}:{sides}"),
         }
     }
 }
@@ -124,6 +128,7 @@ enum LoadGeometry {
     Cylinder,
     CylinderShape(u32),
     Capsule(f32, f32),
+    ConeShape { bottom: f32, top: f32, height: f32, sides: u32 },
 }
 
 impl ModelLoad {
@@ -149,6 +154,7 @@ impl ModelLoad {
             ModelSource::Cylinder => LoadGeometry::Cylinder,
             ModelSource::CylinderShape { sides } => LoadGeometry::CylinderShape(*sides),
             ModelSource::Capsule { radius, height } => LoadGeometry::Capsule(*radius, *height),
+            ModelSource::ConeShape { bottom, top, height, sides } => LoadGeometry::ConeShape { bottom: *bottom, top: *top, height: *height, sides: *sides },
             ModelSource::Plane { subdivisions } => LoadGeometry::Plane(*subdivisions),
             _ => LoadGeometry::Cube,
         };
@@ -190,6 +196,10 @@ impl ModelLoad {
             }
             LoadGeometry::CylinderShape(sides) => {
                 let (vertices, indices) = build_cylinder_shape_mesh(*sides);
+                self.build(&vertices, &indices, device, queue, transform_bind_group_layout)
+            }
+            LoadGeometry::ConeShape { bottom, top, height, sides } => {
+                let (vertices, indices) = build_cone_shape_mesh(*bottom, *top, *height, *sides);
                 self.build(&vertices, &indices, device, queue, transform_bind_group_layout)
             }
             LoadGeometry::Capsule(radius, height) => {

@@ -189,6 +189,61 @@ pub(crate) fn build_cylinder_shape_mesh(sides: u32) -> (Vec<ModelVertex>, Vec<u3
     (vertices, indices)
 }
 
+/// A cone `height` tall, centered, standing along Y, `bottom` in radius at
+/// its bottom and `top` at its top, with `sides` flat sides - each its own
+/// flat normal, leaning out as the side does (as Blender draws its cone),
+/// and a flat cap on each end that isn't a point. Its corners are at angles
+/// 0, 1/sides, 2/sides... of a turn.
+pub(crate) fn build_cone_shape_mesh(bottom: f32, top: f32, height: f32, sides: u32) -> (Vec<ModelVertex>, Vec<u32>) {
+    let sides = sides.max(3);
+    let half = height / 2.0;
+    let at = |side: u32| (side as f32 / sides as f32 * std::f32::consts::TAU).sin_cos();
+    let (mut vertices, mut indices) = (Vec::new(), Vec::new());
+    for side in 0..sides {
+        let ((s0, c0), (s1, c1)) = (at(side), at(side + 1));
+        // Out of the side's middle, tipped up as much as the side narrows.
+        let (sin, cos) = ((side as f32 + 0.5) / sides as f32 * std::f32::consts::TAU).sin_cos();
+        let lean = (bottom - top) * (std::f32::consts::PI / sides as f32).cos();
+        let n = Vector3::new(cos * height, lean, sin * height).try_normalize(1e-6).unwrap_or_else(Vector3::y);
+        let normal = [n.x, n.y, n.z];
+        let (u0, u1) = (side as f32 / sides as f32, (side + 1) as f32 / sides as f32);
+        let base = vertices.len() as u32;
+        vertices.push(ModelVertex { position: [c0 * top, half, s0 * top], tex_coords: [u0, 0.0], normal });
+        vertices.push(ModelVertex { position: [c0 * bottom, -half, s0 * bottom], tex_coords: [u0, 1.0], normal });
+        vertices.push(ModelVertex { position: [c1 * bottom, -half, s1 * bottom], tex_coords: [u1, 1.0], normal });
+        vertices.push(ModelVertex { position: [c1 * top, half, s1 * top], tex_coords: [u1, 0.0], normal });
+        // Counter-clockwise seen from outside; a pointed end's triangle has
+        // no area, so it's left out.
+        if top > 0.0 {
+            indices.extend_from_slice(&[base, base + 3, base + 2]);
+        }
+        if bottom > 0.0 {
+            indices.extend_from_slice(&[base, base + 2, base + 1]);
+        }
+    }
+    for (y, radius, up) in [(half, top, true), (-half, bottom, false)] {
+        if radius <= 0.0 {
+            continue;
+        }
+        let normal = [0.0, if up { 1.0 } else { -1.0 }, 0.0];
+        let center = vertices.len() as u32;
+        vertices.push(ModelVertex { position: [0.0, y, 0.0], tex_coords: [0.5, 0.5], normal });
+        for side in 0..sides {
+            let (sin, cos) = at(side);
+            vertices.push(ModelVertex { position: [cos * radius, y, sin * radius], tex_coords: [0.5 + cos * 0.5, 0.5 + sin * 0.5], normal });
+        }
+        for side in 0..sides {
+            let (here, next) = (center + 1 + side, center + 1 + (side + 1) % sides);
+            if up {
+                indices.extend_from_slice(&[center, next, here]);
+            } else {
+                indices.extend_from_slice(&[center, here, next]);
+            }
+        }
+    }
+    (vertices, indices)
+}
+
 /// A capsule `radius` around and `height` from tip to tip, centered,
 /// standing along Y - two half spheres with a cylinder between them (none,
 /// when `height` is no more than its width).
@@ -214,6 +269,7 @@ pub(crate) fn collision_geometry(source: &ModelSource, custom: &HashMap<String, 
         ModelSource::Cylinder => build_cylinder_mesh(),
         ModelSource::CylinderShape { sides } => build_cylinder_shape_mesh(*sides),
         ModelSource::Capsule { radius, height } => build_capsule_mesh(*radius, *height),
+        ModelSource::ConeShape { bottom, top, height, sides } => build_cone_shape_mesh(*bottom, *top, *height, *sides),
         ModelSource::Mesh(name) => {
             let mesh = custom.get(name)?;
             (mesh.vertices.clone(), mesh.indices.clone())
@@ -350,6 +406,27 @@ mod tests {
         assert_eq!(hull.as_convex_polyhedron().unwrap().points().len(), 16);
         assert!(!triangles.is_empty());
         assert!(collision_geometry(&ModelSource::Mesh("never added".to_owned()), &custom).is_none());
+        // A pointed cone: its corners around the bottom, and the tip.
+        let (points, _) = collision_geometry(&ModelSource::ConeShape { bottom: 1.0, top: 0.0, height: 2.0, sides: 10 }, &custom).unwrap();
+        let hull = rapier3d::prelude::SharedShape::convex_hull(&points.iter().map(|point| nalgebra::Point3::from(*point)).collect::<Vec<_>>()).unwrap();
+        assert_eq!(hull.as_convex_polyhedron().unwrap().points().len(), 11);
         assert!(collision_geometry(&ModelSource::File("a.glb".to_owned()), &custom).is_none());
+    }
+
+    #[test]
+    fn a_cone_shape_narrows_to_its_top_and_lights_its_sides_leaning() {
+        let (vertices, indices) = build_cone_shape_mesh(1.0, 0.5, 2.0, 8);
+        // 4 a side, plus a middle and 8 corners for each cap.
+        assert_eq!(vertices.len(), 8 * 4 + 2 * 9);
+        assert_eq!(indices.len(), 8 * 6 + 2 * 8 * 3);
+        let radius = |v: &ModelVertex| (v.position[0].powi(2) + v.position[2].powi(2)).sqrt();
+        assert!(vertices.iter().filter(|v| v.position[1] > 0.0 && radius(v) > 0.0).all(|v| (radius(v) - 0.5).abs() < 1e-5));
+        assert!(vertices.iter().filter(|v| v.position[1] < 0.0 && radius(v) > 0.0).all(|v| (radius(v) - 1.0).abs() < 1e-5));
+        // Narrower on top: the sides face a little up.
+        assert!(vertices[0].normal[1] > 0.0);
+        // Pointed: no top cap, one triangle a side.
+        let (vertices, indices) = build_cone_shape_mesh(1.0, 0.0, 2.0, 8);
+        assert_eq!(vertices.len(), 8 * 4 + 9);
+        assert_eq!(indices.len(), 8 * 3 + 8 * 3);
     }
 }

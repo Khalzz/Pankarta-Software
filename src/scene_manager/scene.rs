@@ -269,7 +269,7 @@ impl Scene {
 
         if has_physics {
             if self.started {
-                physics_bridge::register_physics_body(self, &id, &mut app.assets.collision_meshes)?;
+                physics_bridge::register_physics_body(self, &id, &mut app.assets)?;
             } else {
                 self.pending_bodies.push(id.clone());
             }
@@ -401,7 +401,7 @@ impl Scene {
             }
         }
         for id in std::mem::take(&mut self.pending_bodies) {
-            if let Err(error) = physics_bridge::register_physics_body(self, &id, &mut app.assets.collision_meshes) {
+            if let Err(error) = physics_bridge::register_physics_body(self, &id, &mut app.assets) {
                 eprintln!("node '{id}': {error}");
             }
         }

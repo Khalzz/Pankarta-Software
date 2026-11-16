@@ -5,7 +5,6 @@ pub mod player;
 pub mod scene;
 pub mod sensor_gallery;
 pub mod sign;
-pub mod zone;
 
 #[tokio::main]
 async fn main() {

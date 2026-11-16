@@ -1,12 +1,19 @@
 use nalgebra::{UnitQuaternion, Vector3};
 use pankarta_software::physics::PhysicsWorld;
 use pankarta_software::prelude::*;
+use pankarta_software::rapier3d::prelude::SharedShape;
 
 const RADIANS_PER_COUNT: f32 = 0.0004;
 
 const PLAYER_RADIUS: f32 = 0.35;
 const PLAYER_HALF_HEIGHT: f32 = 0.9;
 const EYE_HEIGHT: f32 = 0.7;
+/// Half as tall as it stands while crouching (1.1 m in all), its feet kept
+/// where they are - its top comes down.
+const CROUCH_HALF_HEIGHT: f32 = 0.55;
+/// The eye, over the body's middle, while crouching - as far under its
+/// (lower) top as `EYE_HEIGHT` is standing.
+const CROUCH_EYE_HEIGHT: f32 = EYE_HEIGHT - 2.0 * (PLAYER_HALF_HEIGHT - CROUCH_HALF_HEIGHT);
 
 const PLAYER_MASS: f32 = 80.0;
 
@@ -24,6 +31,7 @@ struct Movement {
     spawn: Vector3<f32>,
     walk_speed: f32,
     run_speed: f32,
+    crouch_speed: f32,
     jump_speed: f32,
     fall_gravity: f32,
     ground_deceleration: f32,
@@ -34,6 +42,17 @@ struct Movement {
 pub struct Player {
     camera: Camera,
     movement: Movement,
+    crouch: Crouch,
+}
+
+/// Crouching (held "crouch"): a shorter capsule, a lower eye, slower.
+struct Crouch {
+    crouched: bool,
+    /// The eye's height over the body's middle now - easing between
+    /// `EYE_HEIGHT` and `CROUCH_EYE_HEIGHT`.
+    eye_height: f32,
+    /// Seconds the eye takes to get most of the way down or up.
+    smoothing: f32,
 }
 
 impl Player {
@@ -49,12 +68,14 @@ impl Player {
                 spawn,
                 walk_speed: 10.0,
                 run_speed: 15.0,
+                crouch_speed: 4.0,
                 jump_speed: 7.0,
                 fall_gravity: 1.5,
                 ground_deceleration: 8.0,
                 ground_acceleration: 8.0,
                 air_acceleration: 3.0,
             },
+            crouch: Crouch { crouched: false, eye_height: EYE_HEIGHT, smoothing: 0.08 },
         }
     }
 }
@@ -65,7 +86,7 @@ impl Behavior for Player {
             position: self.movement.spawn,
             ..Default::default()
         });
-        // What sensors see it as (see zone.rs).
+        // What sensors see it as (see sensor_gallery.rs).
         node.set_property(Layers::new(["player"]));
         node.set_property(RigidBodyBuilder::dynamic().lock_rotations().ccd_enabled(true));
         node.set_property(Colliders::new()
@@ -108,8 +129,13 @@ impl Behavior for Player {
         let Some(camera) = scene.get_node_mut("camera") else {
             return;
         };
+        // The eye eases down when it crouches and back up when it stands -
+        // the same at any frame rate.
+        let eye_target = if self.crouch.crouched { CROUCH_EYE_HEIGHT } else { EYE_HEIGHT };
+        let ease = 1.0 - (-app.time.delta_time / self.crouch.smoothing.max(0.0001)).exp();
+        self.crouch.eye_height += (eye_target - self.crouch.eye_height) * ease;
         if let Some(transform) = camera.get_property_mut::<Transform3D>() {
-            transform.position = position + Vector3::y() * EYE_HEIGHT;
+            transform.position = position + Vector3::y() * self.crouch.eye_height;
             transform.rotation =
                 heading * UnitQuaternion::from_axis_angle(&Vector3::x_axis(), self.camera.pitch);
         }
@@ -129,13 +155,23 @@ impl Behavior for Player {
             .input
             .get_vector("left", "right", "forward", "back")
             .normalize();
-        let speed = if app.input.is_pressed("run") {
+        let grounded = self::on_ground(&app.physics, &node.id);
+
+        // Crouches while "crouch" is held - and stays down after it's let go
+        // until there's room over its head to stand.
+        let crouched = app.input.is_pressed("crouch") || (self.crouch.crouched && !room_to_stand(&app.physics, &node.id));
+        if crouched != self.crouch.crouched {
+            self.crouch.crouched = crouched;
+            set_crouched(&mut app.physics, &node.id, crouched);
+        }
+
+        let speed = if crouched {
+            self.movement.crouch_speed
+        } else if app.input.is_pressed("run") {
             self.movement.run_speed
         } else {
             self.movement.walk_speed
         };
-
-        let grounded = self::on_ground(&app.physics, &node.id);
 
         let heading = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), self.camera.yaw);
         let forward = heading * Vector3::z();
@@ -165,7 +201,7 @@ impl Behavior for Player {
             // velocity.z = movement.z;
 
             // Jump logic
-            if app.input.is_just_pressed("jump") && grounded {
+            if app.input.is_just_pressed("jump") && grounded && !crouched {
                 velocity.y = self.movement.jump_speed;
             }
 
@@ -185,6 +221,30 @@ impl Behavior for Player {
 }
 
 const GROUND_MARGIN: f32 = 0.08;
+
+/// Makes node `id`'s capsule (its first collider) crouching-short or
+/// standing-tall - Rapier's own collider, changed while it runs. Moved down
+/// as it shrinks, so its feet stay on the ground and its top comes down.
+fn set_crouched(physics: &mut PhysicsWorld, id: &str, crouched: bool) {
+    let half_height = if crouched { CROUCH_HALF_HEIGHT } else { PLAYER_HALF_HEIGHT };
+    if let Some(collider) = physics.collider_mut(id, 0) {
+        collider.set_shape(SharedShape::capsule_y(half_height - PLAYER_RADIUS, PLAYER_RADIUS));
+        collider.set_translation_wrt_parent(Vector3::y() * (half_height - PLAYER_HALF_HEIGHT));
+    }
+}
+
+/// Whether node `id` can stand up: nothing over its head, up to where its
+/// standing top would be.
+fn room_to_stand(physics: &PhysicsWorld, id: &str) -> bool {
+    let Some(body) = physics.body(id) else {
+        return true;
+    };
+    let center = *body.translation();
+    let edge = PLAYER_RADIUS * 0.7;
+    [Vector3::zeros(), Vector3::x() * edge, -Vector3::x() * edge, Vector3::z() * edge, -Vector3::z() * edge]
+        .iter()
+        .all(|offset| physics.cast_ray(center + offset, Vector3::y(), PLAYER_HALF_HEIGHT + GROUND_MARGIN, Some(id)).is_none())
+}
 
 pub fn on_ground(physics: &PhysicsWorld, id: &str) -> bool {
     let Some(body) = physics.body(id) else {

@@ -9,7 +9,7 @@ use rapier3d::prelude::{ColliderBuilder, RigidBodyBuilder, RigidBodyType};
 
 use crate::asset_manager::Meshes;
 use crate::physics::model_shape::{ModelPlaceholder, ModelRef, ModelShape};
-use crate::scene_manager::node::properties::Model;
+use crate::scene_manager::node::properties::{Mesh, Model};
 use crate::ui::color::UiColor;
 
 /// One collider of a node's `Colliders`: Rapier's own `ColliderBuilder` -
@@ -18,7 +18,7 @@ use crate::ui::color::UiColor;
 /// with `Colliders::detects`/`debug`).
 ///
 /// Its `Collider::..` functions make shapes Rapier has no constructor for -
-/// from a model's meshes, a dome, a many-sided cylinder - as Rapier's own
+/// from a model's or a mesh's geometry, a dome - as Rapier's own
 /// `ColliderBuilder`, for `Colliders::add`.
 #[derive(Debug, Clone)]
 pub struct Collider {
@@ -34,7 +34,8 @@ pub struct Collider {
 
 impl Collider {
     /// Rapier's collider shaped by `model`'s meshes - the ones `meshes`
-    /// picks - made into `shape`. Every Rapier setting chains onto it:
+    /// picks, by name: its file's meshes and its parts - made into `shape`.
+    /// Every Rapier setting chains onto it:
     ///
     ///     let table = Model::file("models/table.glb").hide_meshes(Meshes::prefix("col_"));
     ///     Colliders::new()
@@ -42,24 +43,48 @@ impl Collider {
     ///             .friction(0.6)
     ///             .mass(3.0))
     ///
-    /// The file is read once, with its scene's other assets (see
-    /// `app.assets.collision_meshes`). When the node spawns, the meshes -
-    /// placed and scaled as the node draws them: the node's scale, the
-    /// model's `transform` - become the shape, merged into one, or one
-    /// collider apiece with `Meshes::each`; the settings stay. One that
-    /// can't be read or made is left out, saying why.
+    ///     let tank = Model::new().part("hull", Mesh::cube()).part("turret", Mesh::cylinder_shape(0.8, 0.6, 16));
+    ///     Colliders::new().add(Collider::from_model(&tank, Meshes::all().each(), ModelShape::ConvexHull))
+    ///
+    /// A file is read once, with its scene's other assets (see
+    /// `app.assets.collision_meshes`); parts need nothing read. When the
+    /// node spawns, the meshes - placed and scaled as the node draws them:
+    /// the node's scale, the model's `transform`, a part's own - become the
+    /// shape, merged into one, or one collider apiece with `Meshes::each`;
+    /// the settings stay. One that can't be read or made is left out,
+    /// saying why.
     pub fn from_model(model: &Model, meshes: Meshes, shape: ModelShape) -> ColliderBuilder {
-        let model = match model.file_path() {
-            Some(path) => ModelRef::File { path: path.to_owned(), transform: model.transform },
-            None => ModelRef::NoFile,
-        };
+        let parts = model.parts().map(|(name, mesh)| (name.to_owned(), mesh.clone())).collect();
+        let model = ModelRef::Model { file: model.file_path().map(str::to_owned), parts, transform: model.transform };
         ModelPlaceholder { model, meshes, shape }.into_builder()
     }
 
-    /// `from_model` with its node's own `Model` file, whatever it is when
-    /// the node spawns.
+    /// `from_model` with its node's own `Model` - file and parts - whatever
+    /// it is when the node spawns.
     pub fn from_own_model(meshes: Meshes, shape: ModelShape) -> ColliderBuilder {
-        ModelPlaceholder { model: ModelRef::Own, meshes, shape }.into_builder()
+        ModelPlaceholder { model: ModelRef::OwnModel, meshes, shape }.into_builder()
+    }
+
+    /// Rapier's collider shaped by `mesh` - exactly the geometry it's drawn
+    /// with, placed and scaled as a node drawing it would - made into
+    /// `shape`. The mesh doesn't have to be drawn: an invisible zone can
+    /// take its shape from one.
+    ///
+    ///     let barrel = Mesh::cylinder_shape(1.0, 2.0, 32);
+    ///     Node::new("barrel")
+    ///         .with_property(barrel.clone())
+    ///         .with_property(RigidBodyBuilder::dynamic())
+    ///         .with_property(Colliders::new().add(Collider::from_mesh(&barrel, ModelShape::ConvexHull).mass(50.0)))
+    ///
+    /// `from_model(&Model::from(mesh.clone()), Meshes::all(), shape)`.
+    pub fn from_mesh(mesh: &Mesh, shape: ModelShape) -> ColliderBuilder {
+        Self::from_model(&Model::from(mesh.clone()), Meshes::all(), shape)
+    }
+
+    /// `from_mesh` with its node's own `Mesh`, whatever it is when the node
+    /// spawns.
+    pub fn from_own_mesh(shape: ModelShape) -> ColliderBuilder {
+        ModelPlaceholder { model: ModelRef::OwnMesh, meshes: Meshes::all(), shape }.into_builder()
     }
 
     /// Half a ball of `radius`, its flat side down on the center - a dome.
@@ -76,22 +101,6 @@ impl Collider {
             for segment in 0..SEGMENTS {
                 let (sin, cos) = (segment as f32 / SEGMENTS as f32 * TAU).sin_cos();
                 points.push(Point3::new(cos * out, rise, sin * out) * radius);
-            }
-        }
-        hull(&points)
-    }
-
-    /// A standing cylinder with `sides` flat sides (3 or more) instead of a
-    /// perfectly round one - a prism, like Blender's cylinder (32 sides by
-    /// default there, Radius 1, Depth 2: `cylinder_with_sides(1.0, 1.0, 32)`).
-    /// Rapier's own `ColliderBuilder::cylinder` is exactly round.
-    pub fn cylinder_with_sides(half_height: f32, radius: f32, sides: usize) -> ColliderBuilder {
-        let sides = sides.max(3);
-        let mut points = Vec::with_capacity(sides * 2);
-        for side in 0..sides {
-            let (sin, cos) = (side as f32 / sides as f32 * TAU).sin_cos();
-            for y in [-half_height, half_height] {
-                points.push(Point3::new(cos * radius, y, sin * radius));
             }
         }
         hull(&points)
@@ -317,8 +326,6 @@ mod tests {
     fn engine_shapes_are_their_size() {
         let dome = Collider::hemisphere(2.0).shape.compute_local_aabb();
         assert!((dome.maxs.y - 2.0).abs() < 1e-4 && dome.mins.y.abs() < 1e-4);
-        let prism = Collider::cylinder_with_sides(1.0, 0.5, 6).shape;
-        assert_eq!(prism.as_convex_polyhedron().expect("a convex hull").points().len(), 12);
     }
 
     #[test]

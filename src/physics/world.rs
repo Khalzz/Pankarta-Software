@@ -207,6 +207,16 @@ impl PhysicsWorld {
         self.handles.get(id).and_then(|handle| self.bodies.get_mut(*handle))
     }
 
+    /// Node `id`'s collider number `index`, in the order its `Colliders`
+    /// added them (a `Meshes::each` collider counts each of its pieces) -
+    /// Rapier's own, to change while it runs: its shape (`set_shape`), where
+    /// it sits (`set_translation_wrt_parent`), friction, whether it's on.
+    pub fn collider_mut(&mut self, id: &str, index: usize) -> Option<&mut Collider> {
+        let body = self.bodies.get(*self.handles.get(id)?)?;
+        let handle = *body.colliders().get(index)?;
+        self.colliders.get_mut(handle)
+    }
+
     /// The handle of node `id`'s body - for Rapier's own calls (joints,
     /// query filters).
     pub fn handle(&self, id: &str) -> Option<RigidBodyHandle> {
@@ -852,5 +862,18 @@ mod tests {
         assert!(world.body("wall").unwrap().is_fixed());
         assert!(world.body("zone").unwrap().is_kinematic());
         assert!(world.followers().any(|id| id == "zone") && !world.followers().any(|id| id == "wall"));
+    }
+
+    #[test]
+    fn a_nodes_colliders_are_reached_in_the_order_they_were_added() {
+        let mut world = PhysicsWorld::new();
+        let colliders = Colliders::new().add(ColliderBuilder::cuboid(1.0, 1.0, 1.0)).add(ColliderBuilder::ball(0.5));
+        world.start(vec![def("thing", Vector3::zeros(), Some(RigidBodyBuilder::dynamic()), colliders, &[])]);
+        assert!(world.collider_mut("thing", 0).unwrap().shape().as_cuboid().is_some());
+        let ball = world.collider_mut("thing", 1).unwrap();
+        assert!(ball.shape().as_ball().is_some());
+        ball.set_shape(rapier3d::prelude::SharedShape::ball(2.0));
+        assert_eq!(world.collider_mut("thing", 1).unwrap().shape().as_ball().unwrap().radius, 2.0);
+        assert!(world.collider_mut("thing", 2).is_none() && world.collider_mut("nobody", 0).is_none());
     }
 }

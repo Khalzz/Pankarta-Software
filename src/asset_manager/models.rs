@@ -8,7 +8,7 @@ use wgpu::util::DeviceExt;
 use crate::app::App;
 use crate::asset_manager::gltf::{load_model_with, DoubleSided};
 use crate::asset_manager::normalize;
-use crate::asset_manager::primitives::{build_capsule_mesh, build_cube_mesh, build_cylinder_mesh, build_mesh_model, build_plane_mesh, build_sphere_mesh};
+use crate::asset_manager::primitives::{build_capsule_mesh, build_cube_mesh, build_cylinder_mesh, build_cylinder_shape_mesh, build_mesh_model, build_plane_mesh, build_sphere_mesh};
 use crate::rendering::instance_management::ModelDataInstance;
 use crate::rendering::models::model::{Mesh, Model, ModelVertex};
 
@@ -60,6 +60,8 @@ pub(crate) enum ModelSource {
     Sphere,
     /// Diameter 1, height 1 - sized by scale.
     Cylinder,
+    /// Diameter 1, height 1, `sides` flat sides - sized by scale.
+    CylinderShape { sides: u32 },
     /// Its own geometry for each size: scaling one would squash its ends.
     Capsule { radius: f32, height: f32 },
 }
@@ -74,6 +76,7 @@ impl ModelSource {
             Self::Plane { subdivisions } => format!("engine:plane:{subdivisions}"),
             Self::Sphere => "engine:sphere".to_owned(),
             Self::Cylinder => "engine:cylinder".to_owned(),
+            Self::CylinderShape { sides } => format!("engine:cylinder_shape:{sides}"),
             Self::Capsule { radius, height } => format!("engine:capsule:{radius}:{height}"),
         }
     }
@@ -119,6 +122,7 @@ enum LoadGeometry {
     Plane(u32),
     Sphere,
     Cylinder,
+    CylinderShape(u32),
     Capsule(f32, f32),
 }
 
@@ -143,6 +147,7 @@ impl ModelLoad {
         let geometry = match source {
             ModelSource::Sphere => LoadGeometry::Sphere,
             ModelSource::Cylinder => LoadGeometry::Cylinder,
+            ModelSource::CylinderShape { sides } => LoadGeometry::CylinderShape(*sides),
             ModelSource::Capsule { radius, height } => LoadGeometry::Capsule(*radius, *height),
             ModelSource::Plane { subdivisions } => LoadGeometry::Plane(*subdivisions),
             _ => LoadGeometry::Cube,
@@ -181,6 +186,10 @@ impl ModelLoad {
             }
             LoadGeometry::Cylinder => {
                 let (vertices, indices) = build_cylinder_mesh();
+                self.build(&vertices, &indices, device, queue, transform_bind_group_layout)
+            }
+            LoadGeometry::CylinderShape(sides) => {
+                let (vertices, indices) = build_cylinder_shape_mesh(*sides);
                 self.build(&vertices, &indices, device, queue, transform_bind_group_layout)
             }
             LoadGeometry::Capsule(radius, height) => {

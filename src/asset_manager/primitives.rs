@@ -1,12 +1,15 @@
 //! Models the engine builds instead of reading a file - `Mesh::cube`,
-//! `plane`, `sphere`, `cylinder`, `capsule`, and a game's own mesh (see
-//! `AssetManager::add_mesh`).
+//! `plane`, `sphere`, `cylinder`, `cylinder_shape`, `capsule`, and a game's
+//! own mesh (see `AssetManager::add_mesh`).
 
 use std::collections::HashMap;
+use std::sync::Arc;
+
+use nalgebra::Vector3;
 
 use wgpu::util::DeviceExt;
 
-use crate::asset_manager::models::ModelGeometry;
+use crate::asset_manager::models::{MeshData, ModelGeometry, ModelSource};
 use crate::rendering::models::model::{self, Model, ModelVertex};
 use crate::rendering::models::textures::Texture;
 use crate::scene_manager::node::properties::Transform3D;
@@ -141,6 +144,51 @@ pub(crate) fn build_cylinder_mesh() -> (Vec<ModelVertex>, Vec<u32>) {
     (vertices, indices)
 }
 
+/// A cylinder 1 across and 1 tall, centered, standing along Y, with `sides`
+/// flat sides - each its own two triangles with its own flat normal (as
+/// Blender draws its cylinder), and a flat cap top and bottom. Its corners
+/// are on the circle, at angles 0, 1/sides, 2/sides... of a turn.
+pub(crate) fn build_cylinder_shape_mesh(sides: u32) -> (Vec<ModelVertex>, Vec<u32>) {
+    let sides = sides.max(3);
+    let corner = |side: u32| {
+        let (sin, cos) = (side as f32 / sides as f32 * std::f32::consts::TAU).sin_cos();
+        (cos * 0.5, sin * 0.5)
+    };
+    let (mut vertices, mut indices) = (Vec::new(), Vec::new());
+    for side in 0..sides {
+        let ((x0, z0), (x1, z1)) = (corner(side), corner(side + 1));
+        // Facing out of the middle of the side.
+        let (sin, cos) = ((side as f32 + 0.5) / sides as f32 * std::f32::consts::TAU).sin_cos();
+        let normal = [cos, 0.0, sin];
+        let (u0, u1) = (side as f32 / sides as f32, (side + 1) as f32 / sides as f32);
+        let base = vertices.len() as u32;
+        vertices.push(ModelVertex { position: [x0, 0.5, z0], tex_coords: [u0, 0.0], normal });
+        vertices.push(ModelVertex { position: [x0, -0.5, z0], tex_coords: [u0, 1.0], normal });
+        vertices.push(ModelVertex { position: [x1, -0.5, z1], tex_coords: [u1, 1.0], normal });
+        vertices.push(ModelVertex { position: [x1, 0.5, z1], tex_coords: [u1, 0.0], normal });
+        // Counter-clockwise seen from outside, as build_rings winds them.
+        indices.extend_from_slice(&[base, base + 3, base + 2, base, base + 2, base + 1]);
+    }
+    for (y, up) in [(0.5, true), (-0.5, false)] {
+        let normal = [0.0, if up { 1.0 } else { -1.0 }, 0.0];
+        let center = vertices.len() as u32;
+        vertices.push(ModelVertex { position: [0.0, y, 0.0], tex_coords: [0.5, 0.5], normal });
+        for side in 0..sides {
+            let (x, z) = corner(side);
+            vertices.push(ModelVertex { position: [x, y, z], tex_coords: [0.5 + x, 0.5 + z], normal });
+        }
+        for side in 0..sides {
+            let (here, next) = (center + 1 + side, center + 1 + (side + 1) % sides);
+            if up {
+                indices.extend_from_slice(&[center, next, here]);
+            } else {
+                indices.extend_from_slice(&[center, here, next]);
+            }
+        }
+    }
+    (vertices, indices)
+}
+
 /// A capsule `radius` around and `height` from tip to tip, centered,
 /// standing along Y - two half spheres with a cylinder between them (none,
 /// when `height` is no more than its width).
@@ -152,6 +200,29 @@ pub(crate) fn build_capsule_mesh(radius: f32, height: f32) -> (Vec<ModelVertex>,
     let (mut vertices, mut indices) = (Vec::new(), Vec::new());
     build_rings(&rings, radius, &mut vertices, &mut indices);
     (vertices, indices)
+}
+
+/// The geometry a `Mesh` of `source` is drawn with, for a collider: its
+/// points (before the mesh's size and `transform`, see `Mesh::geometry`)
+/// and triangles. `custom` is the meshes the game added
+/// (`AssetManager::add_mesh`); None for a file, or one never added.
+pub(crate) fn collision_geometry(source: &ModelSource, custom: &HashMap<String, Arc<MeshData>>) -> Option<(Vec<Vector3<f32>>, Vec<[u32; 3]>)> {
+    let (vertices, indices) = match source {
+        ModelSource::Cube => build_cube_mesh(),
+        ModelSource::Plane { subdivisions } => build_plane_mesh(*subdivisions),
+        ModelSource::Sphere => build_sphere_mesh(),
+        ModelSource::Cylinder => build_cylinder_mesh(),
+        ModelSource::CylinderShape { sides } => build_cylinder_shape_mesh(*sides),
+        ModelSource::Capsule { radius, height } => build_capsule_mesh(*radius, *height),
+        ModelSource::Mesh(name) => {
+            let mesh = custom.get(name)?;
+            (mesh.vertices.clone(), mesh.indices.clone())
+        }
+        ModelSource::File(_) => return None,
+    };
+    let points = vertices.iter().map(|vertex| Vector3::from(vertex.position)).collect();
+    let triangles = indices.chunks_exact(3).map(|triangle| [triangle[0], triangle[1], triangle[2]]).collect();
+    Some((points, triangles))
 }
 
 /// A model of one mesh, `vertices` and `indices` (three a triangle,
@@ -248,4 +319,37 @@ pub(crate) fn build_mesh_model(name: &str, vertices: &[ModelVertex], indices: &[
 
     let (vertex_buffer, index_buffer) = geometry.upload(device, name);
     Ok(model::Model { mesh_lists, materials, vertex_buffer, index_buffer })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_cylinder_shape_has_its_sides_on_the_circle() {
+        let (vertices, indices) = build_cylinder_shape_mesh(6);
+        // 4 a side, plus the middle and 6 corners for each cap.
+        assert_eq!(vertices.len(), 6 * 4 + 2 * 7);
+        assert_eq!(indices.len(), 6 * 6 + 2 * 6 * 3);
+        for vertex in vertices.iter().filter(|vertex| vertex.position[0] != 0.0 || vertex.position[2] != 0.0) {
+            let out = (vertex.position[0].powi(2) + vertex.position[2].powi(2)).sqrt();
+            assert!((out - 0.5).abs() < 1e-5);
+        }
+        // Each side's normal points out of its middle, flat.
+        let side = &vertices[0..4];
+        assert!(side.iter().all(|vertex| vertex.normal == side[0].normal));
+        assert!(build_cylinder_shape_mesh(1).0.len() == build_cylinder_shape_mesh(3).0.len());
+    }
+
+    #[test]
+    fn a_meshs_collision_geometry_is_what_it_draws() {
+        let custom = HashMap::new();
+        let (points, triangles) = collision_geometry(&ModelSource::CylinderShape { sides: 8 }, &custom).unwrap();
+        let hull = rapier3d::prelude::SharedShape::convex_hull(&points.iter().map(|point| nalgebra::Point3::from(*point)).collect::<Vec<_>>()).unwrap();
+        // A prism's corners: 8 around the top, 8 around the bottom.
+        assert_eq!(hull.as_convex_polyhedron().unwrap().points().len(), 16);
+        assert!(!triangles.is_empty());
+        assert!(collision_geometry(&ModelSource::Mesh("never added".to_owned()), &custom).is_none());
+        assert!(collision_geometry(&ModelSource::File("a.glb".to_owned()), &custom).is_none());
+    }
 }

@@ -8,6 +8,7 @@
         (action: "right", bindings: [Key("D"), ControllerAxis(axis: "LeftX", positive: true)]),
         (action: "jump", bindings: [Key("Space"), ControllerButton("A")]),
         (action: "run", bindings: [Key("Left Shift"), ControllerButton("LeftShoulder")]),
+        (action: "crouch", bindings: [Key("Left Ctrl"), ControllerButton("B")]),
     ],
     mouse: (x_sensitivity: 3.0, y_sensitivity: 3.0),
 )

@@ -80,7 +80,7 @@ impl AssetManager {
                 .ok_or_else(|| format!("there's no mesh '{name}' - add it with app.assets.add_mesh")),
             ModelSource::Cube => Ok(ModelLoad::cube(key, double_sided)),
             ModelSource::Plane { subdivisions } => Ok(ModelLoad::plane(key, *subdivisions, double_sided)),
-            ModelSource::Sphere | ModelSource::Cylinder | ModelSource::Capsule { .. } => Ok(ModelLoad::shape(key, source, double_sided)),
+            ModelSource::Sphere | ModelSource::Cylinder | ModelSource::CylinderShape { .. } | ModelSource::Capsule { .. } => Ok(ModelLoad::shape(key, source, double_sided)),
         }
     }
 }

@@ -142,30 +142,36 @@ pub(crate) fn read_file(path: &str) -> Result<FileMeshes, String> {
     super::gltf::load_collision_meshes(path).map(Arc::new).map_err(|error| error.to_string())
 }
 
-/// `meshes`' meshes of a file, as its node has them: `model` (the model's
-/// own transform, see `Model::transform`) then `node_scale` applied - as
-/// `render_bridge::place` puts them on screen, without the node's position
-/// and rotation (its body's). One `CollisionMesh` for all of them, or one
-/// each with `Meshes::each`; none when nothing matches.
-pub(crate) fn pick(file: &FileMeshes, meshes: &Meshes, model: &Transform3D, node_scale: Vector3<f32>) -> Vec<CollisionMesh> {
-    let scale = node_scale.component_mul(&model.scale);
-    let offset = model.position.component_mul(&node_scale);
-    let place = |point: &Vector3<f32>| Point3::from(offset + model.rotation * point.component_mul(&scale));
-    let picked = file.iter().filter(|(name, _, _)| meshes.matches(name));
+/// One mesh's geometry - a model file's, or a `Mesh`'s (see
+/// `scene_manager::physics_bridge`) - with `at`, where it's placed in its
+/// body's frame: its points end up at `at.position + at.rotation * (at.scale * point)`,
+/// as `render_bridge::place` puts them on screen.
+pub(crate) struct Source<'a> {
+    pub name: &'a str,
+    pub points: &'a [Vector3<f32>],
+    pub triangles: &'a [[u32; 3]],
+    pub at: Transform3D,
+}
+
+/// The `sources` whose names `meshes` picks, placed - one `CollisionMesh`
+/// for all of them, or one each with `Meshes::each`; none when nothing
+/// matches.
+pub(crate) fn pick<'a>(sources: impl IntoIterator<Item = Source<'a>>, meshes: &Meshes) -> Vec<CollisionMesh> {
+    let placed = sources.into_iter().filter(|source| meshes.matches(source.name)).map(|source| {
+        let at = source.at;
+        let points = source.points.iter().map(|point| Point3::from(at.position + at.rotation * point.component_mul(&at.scale))).collect();
+        CollisionMesh { name: source.name.to_owned(), points, triangles: source.triangles.to_vec() }
+    });
     if meshes.each {
-        return picked.map(|(name, points, triangles)| CollisionMesh {
-            name: name.clone(),
-            points: points.iter().map(place).collect(),
-            triangles: triangles.clone(),
-        }).collect();
+        return placed.collect();
     }
     let mut merged = CollisionMesh::default();
     let mut names = Vec::new();
-    for (name, points, triangles) in picked {
+    for mesh in placed {
         let base = merged.points.len() as u32;
-        merged.points.extend(points.iter().map(place));
-        merged.triangles.extend(triangles.iter().map(|[a, b, c]| [a + base, b + base, c + base]));
-        names.push(name.as_str());
+        merged.points.extend(mesh.points);
+        merged.triangles.extend(mesh.triangles.iter().map(|[a, b, c]| [a + base, b + base, c + base]));
+        names.push(mesh.name);
     }
     if names.is_empty() {
         return Vec::new();
@@ -186,6 +192,11 @@ mod tests {
         Arc::new(vec![("body".to_owned(), a, at), ("col_a".to_owned(), b, bt), ("col_b".to_owned(), c, ct)])
     }
 
+    /// The test file's meshes, all placed by `at`.
+    fn sources(file: &FileMeshes, at: Transform3D) -> Vec<Source<'_>> {
+        file.iter().map(|(name, points, triangles)| Source { name, points, triangles, at }).collect()
+    }
+
     #[test]
     fn picks_by_name_and_prefix() {
         assert!(Meshes::all().matches("anything"));
@@ -197,26 +208,28 @@ mod tests {
 
     #[test]
     fn merges_unless_each() {
-        let merged = pick(&file(), &Meshes::prefix("col_"), &Transform3D::default(), Vector3::repeat(1.0));
+        let file = file();
+        let merged = pick(sources(&file, Transform3D::default()), &Meshes::prefix("col_"));
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].name, "col_a,col_b");
         assert_eq!(merged[0].points.len(), 6);
         // The second mesh's triangle points at its own points.
         assert_eq!(merged[0].triangles[1], [3, 4, 5]);
 
-        let each = pick(&file(), &Meshes::prefix("col_").each(), &Transform3D::default(), Vector3::repeat(1.0));
+        let each = pick(sources(&file, Transform3D::default()), &Meshes::prefix("col_").each());
         assert_eq!(each.len(), 2);
         assert_eq!(each[1].name, "col_b");
         assert_eq!(each[1].triangles[0], [0, 1, 2]);
 
-        assert!(pick(&file(), &Meshes::named(["nothing"]), &Transform3D::default(), Vector3::repeat(1.0)).is_empty());
+        assert!(pick(sources(&file, Transform3D::default()), &Meshes::named(["nothing"])).is_empty());
     }
 
     #[test]
     fn placed_as_drawn() {
-        let model = Transform3D { position: Vector3::new(0.0, 1.0, 0.0), scale: Vector3::repeat(2.0), ..Default::default() };
-        let picked = pick(&file(), &Meshes::named(["body"]), &model, Vector3::repeat(3.0));
-        // (1, 0, 0) scaled by 2 * 3, the model's offset scaled by the node's 3.
+        let file = file();
+        let at = Transform3D { position: Vector3::new(0.0, 3.0, 0.0), scale: Vector3::repeat(6.0), ..Default::default() };
+        let picked = pick(sources(&file, at), &Meshes::named(["body"]));
+        // (1, 0, 0) scaled by 6, then moved up 3.
         assert_eq!(picked[0].points[1], Point3::new(6.0, 3.0, 0.0));
     }
 }

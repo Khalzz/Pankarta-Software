@@ -12,7 +12,6 @@ use pankarta_software::ui::TextStyle;
 use crate::player::Player;
 use crate::sensor_gallery::{sensor_gallery, SENSORS};
 use crate::sign::sign_glass;
-use crate::zone::zone;
 
 pub struct WalkingScene {
     /// Which of AMBIENT_GROUND_LEVELS is in use - H cycles them.
@@ -131,10 +130,35 @@ impl WalkingScene {
         // Walk up behind it and look through it.
         let glass = sign_glass("sign_glass", Vector3::new(3.0, 0.0, -6.0), 0.0);
 
-        // Walk onto it - see zone.rs.
-        let pad = zone("zone", Vector3::new(-4.0, 0.0, -6.0));
 
-        let mut nodes = vec![ground, player, plane, toy_jet, sun, glass, pad];
+        // A barrel to push around: a 12-sided cylinder, drawn flat-sided like
+        // Blender's, and colliding with exactly the mesh it's drawn with.
+        let barrel = Node::new("barrel")
+            .with_property(Transform3D { position: Vector3::new(-2.0, 0.6, -30.0), ..Default::default() })
+            .with_property(Mesh::cylinder_shape(0.5, 1.2, 12).material(Material::standard().color(UiColor::Rgb(170, 90, 40))))
+            .with_property(RigidBodyBuilder::dynamic().angular_damping(1.0))
+            .with_property(Colliders::new().add(Collider::from_own_mesh(ModelShape::ConvexHull).mass(30.0)));
+
+        // A stool built from parts - a seat and three legs - each part its own
+        // convex collider (`.each()`), so you can see under it.
+        let leg = |angle: f32| {
+            let (sin, cos) = angle.to_radians().sin_cos();
+            Mesh::cylinder_shape(0.05, 0.6, 6).transform(Transform3D { position: Vector3::new(cos * 0.3, 0.3, sin * 0.3), ..Default::default() })
+        };
+        let stool_model = Model::new()
+            .part("seat", Mesh::cylinder_shape(0.4, 0.08, 16).transform(Transform3D { position: Vector3::new(0.0, 0.64, 0.0), ..Default::default() }))
+            .part("leg_a", leg(90.0))
+            .part("leg_b", leg(210.0))
+            .part("leg_c", leg(330.0))
+            .material(Material::standard().color(UiColor::Rgb(200, 170, 120)));
+        let stool = Node::new("stool")
+            .with_property(Transform3D { position: Vector3::new(2.0, 0.0, -30.0), ..Default::default() })
+            .with_property(RigidBodyBuilder::dynamic().angular_damping(1.0))
+            .with_property(Colliders::new()
+                .add(Collider::from_model(&stool_model, Meshes::all().each(), ModelShape::ConvexHull).mass(1.5)))
+            .with_property(stool_model);
+
+        let mut nodes = vec![ground, player, plane, toy_jet, barrel, stool, sun, glass];
         // Sensors of every shape, outside the cubes - see sensor_gallery.rs.
         nodes.extend(sensor_gallery());
 
@@ -239,14 +263,11 @@ impl SceneBehaviour for WalkingScene {
                 label.set_text(ambient_ground_text(self.ambient_ground));
             }
             if let Some(label) = ui.label_mut("zone") {
-                let mut inside: Vec<&str> = SENSORS
+                let inside: Vec<&str> = SENSORS
                     .iter()
                     .filter(|(id, _)| app.physics.is_inside(id, "player"))
                     .map(|(_, name)| *name)
                     .collect();
-                if app.physics.is_inside("zone", "player") {
-                    inside.push("blue zone");
-                }
                 label.set_text(if inside.is_empty() {
                     String::new()
                 } else {

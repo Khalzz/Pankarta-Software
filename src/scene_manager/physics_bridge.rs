@@ -1,11 +1,14 @@
-use crate::asset_manager::collision::{self, CollisionMeshCache};
+use crate::asset_manager::collision::{self, Source};
+use crate::asset_manager::primitives::collision_geometry;
+use crate::asset_manager::AssetManager;
 use crate::physics::model_shape::{ModelPlaceholder, ModelRef};
 use rapier3d::prelude::RigidBodyBuilder;
 
 use crate::physics::body::{self, Colliders};
 use crate::physics::{Collider, Layers};
 use crate::scene_manager::node::Node;
-use crate::scene_manager::node::properties::Model;
+use crate::scene_manager::node::properties::{Mesh, Model, Transform3D};
+use crate::scene_manager::render_bridge::place;
 use crate::physics::physics_resources::PhysicsObjectDef;
 
 use super::scene::Scene;
@@ -19,11 +22,12 @@ use super::scene::Scene;
 /// "extract once at spawn time" shape, just building a `PhysicsObjectDef`
 /// instead of an `InstanceData`.
 ///
-/// Also where colliders read from a model (`Collider::from_model`) are
-/// built: their meshes taken from `meshes` (`app.assets.collision_meshes` -
-/// the scene's loading step read them already; a file it didn't is read
-/// now, on the spot), placed and scaled as this node draws them, and made
-/// into the Rapier shape they asked for.
+/// Also where colliders read from a model or a mesh (`Collider::from_model`,
+/// `from_mesh`) are built: a file's meshes taken from
+/// `assets.collision_meshes` (the scene's loading step read them already; a
+/// file it didn't is read now, on the spot), a mesh's generated as it's
+/// drawn, all placed and scaled as this node draws them, and made into the
+/// Rapier shape they asked for.
 ///
 /// Unlike `register_static_model`, this never needs to run again for the
 /// same id later - a body's starting position/mass/colliders are only read
@@ -32,7 +36,7 @@ use super::scene::Scene;
 /// A node with colliders and no `RigidBodyBuilder` gets the body they imply
 /// (see `body::implied_body`); one with a body and no colliders, just the
 /// body.
-pub fn register_physics_body(scene: &mut Scene, id: &str, meshes: &mut CollisionMeshCache) -> Result<(), String> {
+pub fn register_physics_body(scene: &mut Scene, id: &str, assets: &mut AssetManager) -> Result<(), String> {
     let node = scene.content.nodes.get(id).ok_or_else(|| format!("no node named '{id}' to register"))?;
     let transform = *node.transform_3d().ok_or_else(|| format!("node '{id}' has no Transform3D property"))?;
     if !has_body(node) {
@@ -43,9 +47,9 @@ pub fn register_physics_body(scene: &mut Scene, id: &str, meshes: &mut Collision
     let follows_node = body::follows_node(&body);
     let layers = node.get_property::<Layers>().map(|layers| layers.0.clone()).unwrap_or_default();
 
-    let own_model = node.get_property::<Model>().and_then(|model| Some((model.file_path()?.to_owned(), model.transform)));
+    let own = Own { model: node.get_property::<Model>(), mesh: node.get_property::<Mesh>() };
     let colliders = entries.into_iter()
-        .flat_map(|collider| resolve_collider(collider, transform.scale, id, own_model.as_ref(), meshes))
+        .flat_map(|collider| resolve_collider(collider, transform.scale, id, &own, assets))
         .collect();
 
     scene.content.physics_bodies.push(PhysicsObjectDef { id: id.to_owned(), position: transform.position, rotation: transform.rotation, body, colliders, layers, follows_node });
@@ -70,43 +74,83 @@ pub(crate) fn moved_by_physics(node: &Node) -> bool {
 pub(crate) fn collision_mesh_paths(node: &Node) -> Vec<&str> {
     let colliders = node.get_property::<Colliders>().into_iter().flat_map(Colliders::iter);
     colliders.filter_map(|collider| match &ModelPlaceholder::of(&collider.builder)?.model {
-        ModelRef::File { path, .. } => Some(path.as_str()),
-        ModelRef::Own => node.get_property::<Model>().and_then(Model::file_path),
-        ModelRef::NoFile => None,
+        ModelRef::Model { file, .. } => file.as_deref(),
+        ModelRef::OwnModel => node.get_property::<Model>().and_then(Model::file_path),
+        ModelRef::OwnMesh => None,
     }).collect()
 }
 
-/// A collider read from a model, made: its meshes from `meshes` (read now
-/// if they weren't), placed by its model's transform and `node_scale`, and
-/// made into its Rapier shape - one collider, or one per mesh with
-/// `Meshes::each`, each with the collider's settings. One that can't be read
-/// or made is left out, saying why. Any other collider as it is.
-fn resolve_collider(collider: Collider, node_scale: nalgebra::Vector3<f32>, id: &str, own_model: Option<&(String, crate::scene_manager::node::properties::Transform3D)>, meshes: &mut CollisionMeshCache) -> Vec<Collider> {
+/// The node's own `Model` and `Mesh`, for `from_own_model`/`from_own_mesh`.
+struct Own<'a> {
+    model: Option<&'a Model>,
+    mesh: Option<&'a Mesh>,
+}
+
+/// A model's meshes - its file's and its parts' - each with where it's
+/// placed in its body's frame.
+struct Gathered {
+    /// The file's meshes, all placed by the model's transform.
+    file: Option<(collision::FileMeshes, Transform3D)>,
+    /// Each part's name, geometry, and where it's placed.
+    parts: Vec<(String, Vec<nalgebra::Vector3<f32>>, Vec<[u32; 3]>, Transform3D)>,
+}
+
+/// A collider read from a model or a mesh, made: its meshes read (a file's
+/// now if they weren't), placed as the node draws them, and made into its
+/// Rapier shape - one collider, or one per mesh with `Meshes::each`, each
+/// with the collider's settings. One that can't be read or made is left
+/// out, saying why. Any other collider as it is.
+fn resolve_collider(collider: Collider, node_scale: nalgebra::Vector3<f32>, id: &str, own: &Own, assets: &mut AssetManager) -> Vec<Collider> {
     let Some(placeholder) = ModelPlaceholder::of(&collider.builder).cloned() else { return vec![collider] };
-    let (path, transform) = match &placeholder.model {
-        ModelRef::File { path, transform } => (path.as_str(), *transform),
-        ModelRef::Own => match own_model {
-            Some((path, transform)) => (path.as_str(), *transform),
+    // The node's scale - its body has its position and rotation.
+    let node = Transform3D { scale: node_scale, ..Default::default() };
+    let (file, parts, model_transform): (Option<&str>, Vec<(String, Mesh)>, Transform3D) = match &placeholder.model {
+        ModelRef::Model { file, parts, transform } => (file.as_deref(), parts.clone(), *transform),
+        ModelRef::OwnModel => match own.model {
+            Some(model) => (model.file_path(), model.parts().map(|(name, mesh)| (name.to_owned(), mesh.clone())).collect(), model.transform),
             None => {
-                eprintln!("node '{id}': a collider from its own model, but it has no Model file - left out");
+                eprintln!("node '{id}': a collider from its own model, but it has no Model - left out");
                 return Vec::new();
             }
         },
-        ModelRef::NoFile => {
-            eprintln!("node '{id}': a collider from a Model with no file - left out");
-            return Vec::new();
-        }
+        ModelRef::OwnMesh => match own.mesh {
+            Some(mesh) => (None, vec![("mesh".to_owned(), mesh.clone())], Transform3D::default()),
+            None => {
+                eprintln!("node '{id}': a collider from its own mesh, but it has no Mesh - left out");
+                return Vec::new();
+            }
+        },
     };
-    let file = match meshes.get_or_load(path) {
-        Ok(file) => file,
-        Err(error) => {
-            eprintln!("node '{id}': collider from '{path}' couldn't be read - left out: {error}");
-            return Vec::new();
+    let what = file.unwrap_or("its meshes").to_owned();
+
+    let mut gathered = Gathered { file: None, parts: Vec::new() };
+    if let Some(path) = file {
+        match assets.collision_meshes.get_or_load(path) {
+            Ok(meshes) => gathered.file = Some((meshes, place(&node, &model_transform))),
+            Err(error) => {
+                eprintln!("node '{id}': collider from '{path}' couldn't be read - left out: {error}");
+                return Vec::new();
+            }
         }
-    };
-    let picked = collision::pick(&file, &placeholder.meshes, &transform, node_scale);
+    }
+    for (name, mesh) in &parts {
+        let (source, geometry_scale) = mesh.geometry();
+        let Some((points, triangles)) = collision_geometry(&source, &assets.models.meshes) else {
+            eprintln!("node '{id}': collider from mesh '{name}' - its geometry isn't there (a custom mesh never added?) - left out");
+            continue;
+        };
+        // As render_bridge::mesh_draw places a mesh in its model.
+        let own_transform = Transform3D { scale: mesh.transform.scale.component_mul(&geometry_scale), ..mesh.transform };
+        gathered.parts.push((name.clone(), points, triangles, place(&node, &place(&model_transform, &own_transform))));
+    }
+
+    let file_sources = gathered.file.iter().flat_map(|(meshes, at)| {
+        meshes.iter().map(move |(name, points, triangles)| Source { name, points, triangles, at: *at })
+    });
+    let part_sources = gathered.parts.iter().map(|(name, points, triangles, at)| Source { name, points, triangles, at: *at });
+    let picked = collision::pick(file_sources.chain(part_sources), &placeholder.meshes);
     if picked.is_empty() {
-        eprintln!("node '{id}': no mesh of '{path}' is {} - collider left out", placeholder.meshes.describe());
+        eprintln!("node '{id}': no mesh of {what} is {} - collider left out", placeholder.meshes.describe());
     }
     picked.into_iter().filter_map(|mesh| {
         let name = mesh.name.clone();
@@ -117,7 +161,7 @@ fn resolve_collider(collider: Collider, node_scale: nalgebra::Vector3<f32>, id: 
                 Some(Collider { builder, ..collider.clone() })
             }
             Err(error) => {
-                eprintln!("node '{id}': collider from mesh '{name}' of '{path}' couldn't be made ({:?}) - left out: {error}", placeholder.shape);
+                eprintln!("node '{id}': collider from mesh '{name}' of {what} couldn't be made ({:?}) - left out: {error}", placeholder.shape);
                 None
             }
         }

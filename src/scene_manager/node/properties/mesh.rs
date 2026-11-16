@@ -14,8 +14,11 @@ pub enum MeshShape {
     /// each side, for a shader that moves its vertices (waves).
     Plane { subdivisions: u32 },
     Sphere { radius: f32 },
-    /// Standing along Y.
+    /// Standing along Y - smooth, exactly round to look at.
     Cylinder { radius: f32, height: f32 },
+    /// Standing along Y, with `sides` flat sides - like Blender's cylinder
+    /// (its Vertices).
+    CylinderShape { radius: f32, height: f32, sides: u32 },
     /// Standing along Y, `height` from tip to tip.
     Capsule { radius: f32, height: f32 },
     /// One the game added with `app.assets.add_mesh(name, ..)`.
@@ -57,6 +60,14 @@ impl Mesh {
 
     pub fn cylinder(radius: f32, height: f32) -> Self {
         Self::new(MeshShape::Cylinder { radius, height })
+    }
+
+    /// A cylinder with `sides` flat sides (3 or more), standing along Y -
+    /// like Blender's: Radius `radius`, Depth `height`, Vertices `sides`
+    /// (Blender's default is `Mesh::cylinder_shape(1.0, 2.0, 32)`). Drawn
+    /// with flat faces; `Collider::from_mesh` collides with exactly it.
+    pub fn cylinder_shape(radius: f32, height: f32, sides: u32) -> Self {
+        Self::new(MeshShape::CylinderShape { radius, height, sides: sides.max(3) })
     }
 
     pub fn capsule(radius: f32, height: f32) -> Self {
@@ -101,6 +112,7 @@ impl Mesh {
             MeshShape::Plane { subdivisions } => (ModelSource::Plane { subdivisions: *subdivisions }, one),
             MeshShape::Sphere { radius } => (ModelSource::Sphere, one * *radius * 2.0),
             MeshShape::Cylinder { radius, height } => (ModelSource::Cylinder, Vector3::new(radius * 2.0, *height, radius * 2.0)),
+            MeshShape::CylinderShape { radius, height, sides } => (ModelSource::CylinderShape { sides: *sides }, Vector3::new(radius * 2.0, *height, radius * 2.0)),
             MeshShape::Capsule { radius, height } => (ModelSource::Capsule { radius: *radius, height: *height }, one),
             MeshShape::Custom(name) => (ModelSource::Mesh(name.clone()), one),
         }

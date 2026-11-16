@@ -1,4 +1,5 @@
-//! Rapier colliders shaped by a model's meshes - see `Collider::from_model`.
+//! Rapier colliders shaped by a model's or a mesh's geometry - see
+//! `Collider::from_model` and `Collider::from_mesh`.
 //!
 //! `from_model` gives back Rapier's own `ColliderBuilder`, so every Rapier
 //! setting chains onto it. Its shape is a stand-in (`ModelPlaceholder`, one
@@ -15,7 +16,7 @@ use rapier3d::parry::shape::{FeatureId, Shape, ShapeType, TypedShape};
 use rapier3d::prelude::{ColliderBuilder, SharedShape};
 
 use crate::asset_manager::{CollisionMesh, Meshes};
-use crate::scene_manager::node::properties::Transform3D;
+use crate::scene_manager::node::properties::{Mesh, Transform3D};
 
 /// Which Rapier shape a model's meshes become (see `Collider::from_model`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,15 +44,16 @@ impl ModelShape {
     }
 }
 
-/// The model a collider is read from.
+/// Where a collider's meshes come from.
 #[derive(Debug, Clone)]
 pub(crate) enum ModelRef {
-    /// A model file, placed in its node by `transform` (the `Model`'s own).
-    File { path: String, transform: Transform3D },
+    /// A `Model`: its file's meshes and its parts, placed in its node by
+    /// `transform` (the `Model`'s own).
+    Model { file: Option<String>, parts: Vec<(String, Mesh)>, transform: Transform3D },
     /// Its node's own `Model`, whatever it is when the node spawns.
-    Own,
-    /// A `Model` with no file - nothing to read.
-    NoFile,
+    OwnModel,
+    /// Its node's own `Mesh`, whatever it is when the node spawns.
+    OwnMesh,
 }
 
 /// The stand-in shape of a collider read from a model (see the module):
@@ -137,7 +139,7 @@ mod tests {
 
     #[test]
     fn settings_chain_on_the_stand_in_and_it_is_found_again() {
-        let placeholder = ModelPlaceholder { model: ModelRef::Own, meshes: Meshes::prefix("col_").each(), shape: ModelShape::ConvexHull };
+        let placeholder = ModelPlaceholder { model: ModelRef::OwnModel, meshes: Meshes::prefix("col_").each(), shape: ModelShape::ConvexHull };
         let builder = placeholder.into_builder().friction(0.25).density(3.0);
         assert_eq!(builder.friction, 0.25);
         let found = ModelPlaceholder::of(&builder).expect("still the stand-in");

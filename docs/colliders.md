@@ -13,9 +13,10 @@ Either can be there without the other. The engine adds only what Rapier can't kn
 | Kinematic bodies | A `kinematic_position_based` body follows its node every frame |
 | A node with colliders and no body | Gets a fixed body, or one following the node if all its colliders are sensors |
 | `Colliders` + `.detects(..)` / `.debug(..)` | The list, which layers a sensor sees, and how a collider is drawn for debugging |
-| `Collider::from_model` / `from_own_model` + `Meshes` | A collider's shape from a model file's meshes, read with the scene's other assets |
+| `Collider::from_model` / `from_own_model` + `Meshes` | A collider's shape from a model's meshes: its file's (read with the scene's other assets) and its parts |
+| `Collider::from_mesh` / `from_own_mesh` | A collider's shape from a `Mesh`: exactly the geometry it's drawn with |
 | `Model::hide_meshes` | Doesn't draw the meshes that are only there for collision |
-| `Collider::hemisphere`, `cylinder_with_sides` | Shapes Rapier has no constructor for |
+| `Collider::hemisphere` | A dome: a shape Rapier has no constructor for |
 
 The prelude has `RigidBodyBuilder`, `ColliderBuilder`, `MassProperties` and `CoefficientCombineRule`. The rest of Rapier is in `pankarta_software::rapier3d`, the engine's own version, so the types always match.
 
@@ -189,7 +190,7 @@ When something can be under it (a dome on a platform, or floating), use `Collide
 
 ---
 
-## 5. Shapes from a model file
+## 5. Shapes from a model or a mesh
 
 `Collider::from_model` gives a **Rapier `ColliderBuilder`** whose shape comes from a model's meshes, so every Rapier setting chains straight onto it:
 
@@ -206,7 +207,7 @@ Node::new("table")
     .with_property(table)
 ```
 
-`Collider::from_own_model(meshes, shape)` is the same with the node's own `Model` file, whatever it is when the node spawns:
+`Collider::from_own_model(meshes, shape)` is the same with the node's own `Model`, whatever it is when the node spawns:
 
 ```rust
 Node::new("crate")
@@ -218,6 +219,53 @@ Node::new("crate")
 ```
 
 A model collider can be a sensor too: `.add(Collider::from_model(&level, Meshes::named(["zone_exit"]), ModelShape::ConvexHull).sensor(true))`.
+
+### A model's parts
+
+A `Model`'s meshes are its file's **and its parts** (`Model::new().part(name, mesh)`). Parts are picked by name like a file's meshes, and need nothing read:
+
+```rust
+// A stool from parts: a seat and three legs, each its own collider.
+let stool = Model::new()
+    .part("seat", Mesh::cylinder_shape(0.4, 0.08, 16).transform(Transform3D { position: Vector3::new(0.0, 0.64, 0.0), ..Default::default() }))
+    .part("leg_a", Mesh::cylinder_shape(0.05, 0.6, 6).transform(/* .. */))
+    .part("leg_b", Mesh::cylinder_shape(0.05, 0.6, 6).transform(/* .. */))
+    .part("leg_c", Mesh::cylinder_shape(0.05, 0.6, 6).transform(/* .. */));
+
+Node::new("stool")
+    .with_property(Transform3D::default())
+    .with_property(RigidBodyBuilder::dynamic())
+    .with_property(Colliders::new()
+        .add(Collider::from_model(&stool, Meshes::all().each(), ModelShape::ConvexHull).mass(1.5)))
+    .with_property(stool)
+```
+
+A part is placed as it's drawn: by its own `transform`, then the model's, then the node's scale.
+
+### A mesh: `Collider::from_mesh`
+
+`Collider::from_mesh(&mesh, shape)` collides with **exactly the geometry a `Mesh` is drawn with**: a cube, a sphere, a cylinder with as many sides as you give it, or your own mesh (`app.assets.add_mesh`, used as `Mesh::custom(name)`).
+
+```rust
+// A barrel like Blender's cylinder: Radius 0.5, Depth 1.2, 12 Vertices - drawn and colliding the same.
+let barrel = Mesh::cylinder_shape(0.5, 1.2, 12);
+
+Node::new("barrel")
+    .with_property(Transform3D::default())
+    .with_property(barrel.clone())
+    .with_property(RigidBodyBuilder::dynamic())
+    .with_property(Colliders::new().add(Collider::from_mesh(&barrel, ModelShape::ConvexHull).mass(30.0)))
+
+// Or from the node's own Mesh, written once:
+    .with_property(Colliders::new().add(Collider::from_own_mesh(ModelShape::ConvexHull).mass(30.0)))
+
+// The mesh doesn't have to be drawn: an invisible 8-sided zone.
+Colliders::new().add(Collider::from_mesh(&Mesh::cylinder_shape(2.0, 3.0, 8), ModelShape::ConvexHull).sensor(true))
+```
+
+It's `from_model(&Model::from(mesh), Meshes::all(), shape)`: a one-part model. Nothing is loaded: the engine's meshes are generated on the spot, and your own are already in memory.
+
+For a perfectly round collider, use Rapier's own `ColliderBuilder::cylinder(half_height, radius)` / `ball(radius)` instead: they're exact shapes with no vertices at all.
 
 ### Which shape: `ModelShape`
 
@@ -289,14 +337,13 @@ The hidden meshes cast no shadow either. Every node hiding the same meshes of a 
 
 ---
 
-## 6. Shapes Rapier doesn't have
+## 6. A dome: `Collider::hemisphere`
 
 ```rust
-Collider::hemisphere(2.0)                     // a dome, flat side down
-Collider::cylinder_with_sides(1.0, 1.0, 32)   // a cylinder with flat sides, like Blender's (Radius 1, Depth 2, 32 vertices)
+Collider::hemisphere(2.0)   // a dome of radius 2, flat side down on its center
 ```
 
-They give a `ColliderBuilder` like any other, so Rapier settings chain on: `.add(Collider::hemisphere(2.0).sensor(true))`. Both are convex hulls around points on the shape, so the dome is a little faceted. Rapier's own `ColliderBuilder::cylinder` is perfectly round.
+It gives a `ColliderBuilder` like any other, so Rapier settings chain on: `.add(Collider::hemisphere(2.0).sensor(true))`. It's a convex hull around points on the dome (6 rings of 16 and the top), so it's a little faceted, and drawn that way in the debug view.
 
 ---
 
@@ -304,4 +351,4 @@ They give a `ColliderBuilder` like any other, so Rapier settings chain on: `.add
 
 - **Your node's `Layers`** set each collider's collision groups, unless you gave the builder groups of your own (`.collision_groups(..)`).
 - **Rapier's API changes between versions.** Code using its builders may need small changes when the engine moves to a newer Rapier.
-- **Debug drawing** draws boxes, balls, cylinders, cones, capsules, convex shapes, triangle meshes and compounds of those.
+- **Debug drawing** draws Rapier's exact shapes as what they are: a ball as three circles, a cylinder as its two end circles and side lines, a capsule as its circles and sides, a cone as its base circle and lines to its tip. Convex hulls (`from_model`, `from_mesh`, `hemisphere`) and triangle meshes show their real edges, and compounds each of their parts.

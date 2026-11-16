@@ -21,8 +21,7 @@ pub fn zone(id: &str, position: Vector3<f32>) -> Node {
         )
         // A cylinder standing on the pad, as tall as the player.
         .with_property(
-            Sensor::cylinder(HEIGHT / 2.0, RADIUS)
-                .offset(Vector3::y() * HEIGHT / 2.0)
+            Sensor::from(ColliderBuilder::cylinder(HEIGHT / 2.0, RADIUS).translation(Vector3::y() * HEIGHT / 2.0))
                 .detects(["player"])
                 .debug(ColliderDebug::new()
                     .edges(UiColor::Rgb(60, 180, 255))

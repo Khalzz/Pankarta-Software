@@ -22,12 +22,12 @@ pub fn sign_glass(id: &str, position: Vector3<f32>, yaw: f32) -> Node {
             .part("left_post", post(-1.0))
             .part("right_post", post(1.0))
             .part("glass", glass(position, rotation)))
-        .with_property(Physics { rigidbody: RigidBodyData::fixed(), colliders: vec![post_collider(-1.0), post_collider(1.0), glass_collider()] })
+        .with_property(Physics::fixed().collider(post_collider(-1.0)).collider(post_collider(1.0)).collider(glass_collider()))
 }
 
 /// A thin box where the pane is, so you can't walk through it.
-fn glass_collider() -> Collider {
-    Collider::new(ColliderShape::Cuboid { half_extents: (GLASS_SIZE.0 / 2.0, GLASS_SIZE.1 / 2.0, 0.03) }).offset(Vector3::y() * GLASS_HEIGHT)
+fn glass_collider() -> ColliderBuilder {
+    ColliderBuilder::cuboid(GLASS_SIZE.0 / 2.0, GLASS_SIZE.1 / 2.0, 0.03).translation(Vector3::y() * GLASS_HEIGHT)
 }
 
 /// The pane - a plane (which faces up) turned to stand facing back along
@@ -70,6 +70,6 @@ fn post(side: f32) -> Mesh {
         .material(Material::standard().color(UiColor::Hex("#1C1C24")))
 }
 
-fn post_collider(side: f32) -> Collider {
-    Collider::new(ColliderShape::Cuboid { half_extents: (0.06, post_height() / 2.0, 0.06) }).offset(post_position(side))
+fn post_collider(side: f32) -> ColliderBuilder {
+    ColliderBuilder::cuboid(0.06, post_height() / 2.0, 0.06).translation(post_position(side))
 }

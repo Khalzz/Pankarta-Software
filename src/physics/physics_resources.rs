@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use nalgebra::{vector, Point3, Unit, UnitQuaternion, Vector3};
+use nalgebra::{vector, UnitQuaternion, Vector3};
 use rapier3d::prelude::*;
 
 use crate::physics::body;
@@ -28,23 +28,19 @@ pub(crate) fn compute_principal_inertia(mass: f32, center_of_mass: Vector3<f32>,
         position: (f32, f32, f32),
     }
 
-    let boxes: Vec<BoxPart> = colliders.iter().filter_map(|collider| {
-        let offset = collider.offset;
-        match &collider.shape {
-            body::ColliderShape::Cuboid { half_extents } => Some(BoxPart {
-                volume: 8.0 * half_extents.0 * half_extents.1 * half_extents.2,
-                half_extents: *half_extents,
-                position: (offset.x, offset.y, offset.z),
-            }),
-            // Counted as the box around it.
-            body::ColliderShape::ConvexHull { points } if !points.is_empty() => {
-                let (low, high) = points.iter().fold((points[0], points[0]), |(low, high), point| (low.inf(point), high.sup(point)));
-                let half = (high - low) * 0.5;
-                let center = (high + low) * 0.5 + offset;
-                Some(BoxPart { volume: 8.0 * half.x * half.y * half.z, half_extents: (half.x, half.y, half.z), position: (center.x, center.y, center.z) })
-            }
-            _ => None,
+    // Each solid collider counted as the upright box around it, where it
+    // sits - not sensors, nor shapes with no inside (a half space, a
+    // triangle mesh).
+    let boxes: Vec<BoxPart> = colliders.iter().filter(|collider| !collider.is_sensor()).filter_map(|collider| {
+        let shape = &collider.builder.shape;
+        if shape.as_halfspace().is_some() || shape.as_trimesh().is_some() || shape.as_heightfield().is_some() {
+            return None;
         }
+        let aabb = shape.compute_aabb(&collider.builder.position);
+        let half = aabb.half_extents();
+        let center = aabb.center();
+        let volume = 8.0 * half.x * half.y * half.z;
+        (volume.is_finite() && volume > 0.0).then(|| BoxPart { volume, half_extents: (half.x, half.y, half.z), position: (center.x, center.y, center.z) })
     }).collect();
 
     let total_volume: f32 = boxes.iter().map(|b| b.volume).sum();
@@ -129,7 +125,7 @@ impl LayerBits {
     /// any); a sensor sees only what it `detects`, anything else everything.
     fn groups(&mut self, layers: &[String], collider: &body::Collider) -> InteractionGroups {
         let memberships = if layers.is_empty() { Group::GROUP_1 } else { self.bits(layers) };
-        let filter = if collider.sensor && !collider.detects.is_empty() { self.bits(&collider.detects) } else { Group::ALL };
+        let filter = if collider.is_sensor() && !collider.detects.is_empty() { self.bits(&collider.detects) } else { Group::ALL };
         InteractionGroups::new(memberships, filter)
     }
 }
@@ -170,23 +166,21 @@ pub(crate) fn load_physics_from_definitions(defs: &[PhysicsObjectDef], collider_
 
         let mut collider_handles: Vec<ColliderHandle> = Vec::new();
         for collider_data in &def.physics.colliders {
-            let Some(builder) = collider_builder(&collider_data.shape, &def.id) else { continue };
-            let mut builder = builder
-                .translation(collider_data.offset)
-                .sensor(collider_data.sensor)
-                .collision_groups(layers.groups(&def.layers, collider_data));
+            // Read from its model when its node spawned (see
+            // scene_manager::physics_bridge) - one still a stand-in never was.
+            if crate::physics::model_shape::ModelPlaceholder::of(&collider_data.builder).is_some() {
+                eprintln!("node '{}': collider read from a model wasn't loaded - left out", def.id);
+                continue;
+            }
+            let mut builder = collider_data.builder.clone();
+            // Its node's layers - unless the game gave it groups of its own.
+            if builder.collision_groups == InteractionGroups::all() {
+                builder = builder.collision_groups(layers.groups(&def.layers, collider_data));
+            }
             // Also sees bodies an animation holds still - static ones it
             // doesn't, or every zone on the ground would detect the ground.
-            if collider_data.sensor {
-                builder = builder.active_collision_types(ActiveCollisionTypes::default() | ActiveCollisionTypes::KINEMATIC_KINEMATIC);
-            }
-            // The lower friction and the higher bounce of two touching
-            // colliders win - so a 0 friction always slides, whatever it's on.
-            if let Some(friction) = collider_data.friction {
-                builder = builder.friction(friction).friction_combine_rule(CoefficientCombineRule::Min);
-            }
-            if let Some(restitution) = collider_data.restitution {
-                builder = builder.restitution(restitution).restitution_combine_rule(CoefficientCombineRule::Max);
+            if builder.is_sensor {
+                builder.active_collision_types |= ActiveCollisionTypes::KINEMATIC_KINEMATIC;
             }
             let handle = collider_set.insert_with_parent(builder.build(), rigidbody_handle, rigidbody_set);
             if let Some(debug) = collider_data.debug {
@@ -199,39 +193,3 @@ pub(crate) fn load_physics_from_definitions(defs: &[PhysicsObjectDef], collider_
     }
 }
 
-/// The Rapier collider for `shape` - None (and said why) for one that can't
-/// be built. `id` is the body's node, for the message.
-fn collider_builder(shape: &body::ColliderShape, id: &str) -> Option<ColliderBuilder> {
-    use body::ColliderShape;
-    match shape {
-        ColliderShape::Cuboid { half_extents } => Some(ColliderBuilder::cuboid(half_extents.0, half_extents.1, half_extents.2)),
-        ColliderShape::Ball { radius } => Some(ColliderBuilder::ball(*radius)),
-        ColliderShape::Cylinder { half_height, radius } => Some(ColliderBuilder::cylinder(*half_height, *radius)),
-        ColliderShape::Capsule { half_height, radius } => Some(ColliderBuilder::capsule_y(*half_height, *radius)),
-        ColliderShape::HalfSpace { normal } => Some(ColliderBuilder::halfspace(Unit::new_normalize(*normal))),
-        ColliderShape::ConvexHull { points } => {
-            let points: Vec<Point3<f32>> = points.iter().map(|point| Point3::from(*point)).collect();
-            let builder = ColliderBuilder::convex_hull(&points);
-            if builder.is_none() {
-                eprintln!("convex collider for '{id}' couldn't be built (its points are flat or too few)");
-            }
-            builder
-        }
-        ColliderShape::Trimesh { vertices, indices } => {
-            let points: Vec<Point3<f32>> = vertices.iter().map(|v| Point3::from(*v)).collect();
-            ColliderBuilder::trimesh(points, indices.clone())
-                .map_err(|error| eprintln!("trimesh collider for '{id}' couldn't be built: {error}"))
-                .ok()
-        }
-        ColliderShape::HeightField { .. } => {
-            eprintln!("height field collider for '{id}' isn't supported yet - left out");
-            None
-        }
-        // Resolved into a real shape when the node spawns (see
-        // scene_manager::physics_bridge) - one still here never was.
-        ColliderShape::TrimeshFromModel { .. } | ColliderShape::ConvexHullFromModel { .. } | ColliderShape::ConvexHullFromOwnModel => {
-            eprintln!("collider for '{id}' read from a model wasn't loaded - left out");
-            None
-        }
-    }
-}

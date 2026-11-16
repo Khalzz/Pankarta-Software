@@ -4,7 +4,6 @@
 
 use std::borrow::Cow;
 
-use nalgebra::Vector3;
 
 use crate::app::App;
 use crate::asset_manager::models::{self, DoubleSidedMeshes, ModelSource};
@@ -107,18 +106,6 @@ pub(crate) fn place(outer: &Transform3D, local: &Transform3D) -> Transform3D {
         position: outer.position + outer.rotation * local.position.component_mul(&outer.scale),
         rotation: outer.rotation * local.rotation,
         scale: outer.scale.component_mul(&local.scale),
-    }
-}
-
-/// How much bigger than its node a node's geometry is drawn - what a
-/// collider read from its model file is scaled by.
-pub(crate) fn geometry_scale(node: &Node) -> Vector3<f32> {
-    if let Some(model) = node.get_property::<Model>() {
-        return model.scale();
-    }
-    match node.get_property::<Mesh>() {
-        Some(mesh) => mesh.transform.scale.component_mul(&mesh.geometry().1),
-        None => Vector3::new(1.0, 1.0, 1.0),
     }
 }
 
@@ -290,7 +277,14 @@ fn register_instance(scene: &mut Scene, app: &mut App, pending: Pending) -> Resu
     let model_ref = data.model_ref.clone();
     let loaded_model = match app.assets.models.drawn.remove(&model_ref) {
         Some(existing) => existing.model,
-        None => models::load_scene_model(app, &load.map_err(|error| format!("node '{node}': {error}"))?, variant.as_deref())?,
+        None => {
+            let mut model = models::load_scene_model(app, &load.map_err(|error| format!("node '{node}': {error}"))?, variant.as_deref())?;
+            // A copy of its own: the meshes its Model hides off it.
+            if variant.is_some() {
+                hide_meshes(scene, &node, &mut model);
+            }
+            model
+        }
     };
 
     scene.content.renderizable_instances.insert(instance, data);
@@ -317,7 +311,7 @@ fn register_instance(scene: &mut Scene, app: &mut App, pending: Pending) -> Resu
 
 #[cfg(test)]
 mod tests {
-    use nalgebra::UnitQuaternion;
+    use nalgebra::{UnitQuaternion, Vector3};
 
     use super::*;
 
@@ -358,5 +352,16 @@ mod tests {
         let draws = model_draws("ball", &model);
         assert_eq!(draws[0].local.scale, Vector3::new(6.0, 6.0, 6.0));
         assert_eq!(draws[0].source, ModelSource::Sphere);
+    }
+}
+
+/// The meshes node `node`'s `Model` hides (see `Model::hide_meshes`) hidden
+/// on `model`, a copy of its file of its own.
+fn hide_meshes(scene: &Scene, node: &str, model: &mut crate::rendering::models::model::Model) {
+    let Some(hidden) = scene.content.nodes.get(node).and_then(|node| node.get_property::<Model>()).and_then(Model::hidden_meshes) else { return };
+    for (key, mesh) in model.mesh_lists.values_mut().flat_map(|meshes| meshes.iter_mut()) {
+        if hidden.matches(loaded_object_name(key)) {
+            mesh.visible = false;
+        }
     }
 }

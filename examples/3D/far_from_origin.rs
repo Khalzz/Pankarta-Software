@@ -102,12 +102,9 @@ impl FarFromOriginScene {
                     .with_property(Mesh::plane(0)
                         .transform(Transform3D { scale: Vector3::new(FLOOR_SIZE, 1.0, FLOOR_SIZE), ..Default::default() })
                         .material(Material::standard().texture(GROUND_TEXTURE).tiled(4.0, TextureSpace::World)))
-                    .with_property(Physics {
-                        rigidbody: RigidBodyData::fixed(),
-                        // A slab whose top is the floor's surface.
-                        colliders: vec![Collider::new(ColliderShape::Cuboid { half_extents: (FLOOR_SIZE / 2.0, 0.5, FLOOR_SIZE / 2.0) })
-                            .offset(Vector3::new(0.0, -0.5, 0.0))],
-                    }),
+                    // A slab whose top is the floor's surface.
+                    .with_property(Physics::fixed().collider(ColliderBuilder::cuboid(FLOOR_SIZE / 2.0, 0.5, FLOOR_SIZE / 2.0)
+                        .translation(Vector3::new(0.0, -0.5, 0.0)))),
             );
             nodes.push(
                 Node::new(format!("flying_cube_{index}"))

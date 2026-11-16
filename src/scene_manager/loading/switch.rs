@@ -45,7 +45,7 @@ impl SceneManager {
             .filter(|environment| matches!(environment, Environment::Skybox(_)) && **environment != app.renderer.prepared_from)
             .cloned();
         let uses = UsedAssets { models: assets.keys.clone(), images: image_paths, textures: assets.textures.clone() };
-        let list = LoadList { models: assets.models, trimeshes: assets.trimeshes, images, textures, environment };
+        let list = LoadList { models: assets.models, collision_meshes: assets.collision_meshes, images, textures, environment };
 
         if list.len() == 0 {
             PendingSceneLoad::ready(scene, settings, uses, frame)
@@ -158,8 +158,9 @@ impl SceneManager {
             app.renderer.prepared_environment = prepared;
             app.renderer.prepared_from = environment;
         }
-        scene.finish_loading(app, &loaded.trimeshes);
-        scene.run_on_spawn(app, &loaded.trimeshes);
+        app.assets.collision_meshes.adopt(loaded.collision_meshes);
+        scene.finish_loading(app);
+        scene.run_on_spawn(app);
         println!("[load {}] starting the scene: {:.0} ms", app.scene_manager.active, started.elapsed().as_secs_f64() * 1000.0);
 
         scene.ensure_camera(app);

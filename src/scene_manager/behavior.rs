@@ -90,7 +90,7 @@ pub trait Behavior: Any + AsAny {
     }
 
     /// Runs when node `other` (its id) starts overlapping this node's
-    /// `Sensor` (or a `Collider::sensor` on its body) - right after the
+    /// `Sensor` (or a sensor collider on its body) - right after the
     /// physics step it happened in. `scene.get_node(other)` to look at it.
     fn on_sensor_enter(&mut self, node: &mut Node, other: &str, scene: &mut SceneAccess, app: &mut App) {
         let _ = (node, other, scene, app);

@@ -217,10 +217,8 @@ A node is **an id plus whatever you put on it**. It has no fixed type: a light i
 let crate_node = Node::new("crate_1")                           // a unique id in the scene
     .with_property(Transform3D { position, ..Default::default() })
     .with_property(Mesh::cube())
-    .with_property(Physics {
-        rigidbody: RigidBodyData::dynamic(20.0),
-        colliders: vec![Collider::new(ColliderShape::Cuboid { half_extents: (0.5, 0.5, 0.5) })],
-    })
+    .with_property(Physics::dynamic(20.0)
+        .collider(ColliderBuilder::cuboid(0.5, 0.5, 0.5)))   // Rapier's own collider (see docs/colliders.md)
     .with_behavior(Breakable { hits_left: 3 });
 ```
 
@@ -258,7 +256,7 @@ if let Some(transform) = node.get_property_mut::<Transform3D>() {
 | `Transform2D` | A position, rotation, scale and z index on the 2D plane (screen units). A node has one transform or the other, never both. |
 | `Mesh` | One piece of geometry with one material: `Mesh::cube()`, `plane`, `sphere`, `cylinder`, `capsule`, `custom(name)` |
 | `Model` | A 3D object made of named parts: from a file (`Model::file("models/ship.glb")`), from meshes, or both |
-| `Physics` | A rigid body (`RigidBodyData`) and its colliders |
+| `Physics` | A rigid body and its colliders: `Physics::dynamic(mass).collider(ColliderBuilder::..)`, shapes from a model's meshes with `Collider::from_model` |
 | `CameraLens` | Makes the node a camera (field of view, near plane). A scene without one gets a default camera. |
 | `LookAt` | Turns the node to face another node every frame |
 | `Light` | The sun: `Light::directional(color)`, shining along the node's +Z |
@@ -268,7 +266,7 @@ if let Some(transform) = node.get_property_mut::<Transform3D>() {
 | `Emitter` | A particle effect (`pankarta_software::particles::Emitter`) |
 | `UiLayer` | A UI tree: panels, labels, buttons, images |
 
-More detail is in [docs/meshes_and_models.md](docs/meshes_and_models.md) and [docs/shapes_and_lines.md](docs/shapes_and_lines.md).
+More detail is in [docs/meshes_and_models.md](docs/meshes_and_models.md), [docs/colliders.md](docs/colliders.md) and [docs/shapes_and_lines.md](docs/shapes_and_lines.md).
 
 ### Your own properties
 
@@ -536,6 +534,7 @@ In-depth docs, in [docs/](docs/):
 
 - [scene_loading.md](docs/scene_loading.md): preloading and switching scenes, splash and loading screens
 - [meshes_and_models.md](docs/meshes_and_models.md): `Mesh`, `Model`, parts and materials
+- [colliders.md](docs/colliders.md): bodies and colliders (Rapier's `ColliderBuilder`), shapes from a model's meshes, `Meshes`, `.each()`, hiding collision meshes, sensors
 - [shapes_and_lines.md](docs/shapes_and_lines.md): `Line`, `Shape2D`, 2D `Text`
 - [sign_glass.md](docs/sign_glass.md): a custom shader drawing a sign seen only through a glass
 - [animation_tracks.md](docs/animation_tracks.md): animation

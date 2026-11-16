@@ -5,6 +5,7 @@
 pub mod app;
 /// Everything the game loads - see `AssetManager` (`app.assets`).
 pub mod asset_manager {
+    pub mod collision;
     pub mod folder;
     pub mod gltf;
     pub mod images;
@@ -14,6 +15,7 @@ pub mod asset_manager {
     pub mod sounds;
     pub mod textures;
 
+    pub use collision::{CollisionMesh, CollisionMeshCache, Meshes};
     pub use folder::{asset_path, AssetFolder, DEFAULT_ROOT};
     pub(crate) use folder::normalize;
     pub use images::{Image, ImageCache};
@@ -33,6 +35,9 @@ pub mod asset_manager {
 // from a different egui version wouldn't be the same type).
 pub use egui;
 pub use nalgebra;
+/// Rapier's own types, at the engine's version - for colliders
+/// (`Physics::collider(ColliderBuilder::..)`) and `app.physics.body_mut`.
+pub use rapier3d;
 pub use sdl2;
 
 /// The things most game code uses, in one import:
@@ -41,10 +46,12 @@ pub use sdl2;
 pub mod prelude {
     pub use nalgebra::{UnitQuaternion, Vector2, Vector3};
     pub use crate::app::App;
-    pub use crate::asset_manager::AssetManager;
+    pub use crate::asset_manager::{AssetManager, CollisionMesh, Meshes};
     pub use crate::input::input::{user_dir, Input};
     pub use crate::input::source::{Axis, Button, InputSource, Key, MouseButton};
-    pub use crate::physics::{Collider, ColliderDebug, ColliderShape, Layers, Physics, RigidBodyData, Sensor};
+    pub use crate::physics::{Collider, ColliderDebug, Layers, ModelShape, Physics, RigidBodyData, Sensor};
+    /// What colliders are made of - Rapier's own (see docs/colliders.md).
+    pub use rapier3d::prelude::{CoefficientCombineRule, ColliderBuilder};
     pub use crate::scene_manager::behavior::Behavior;
     pub use crate::scene_manager::node::{Node, NodeLookup, NodeLookupMut};
     pub use crate::scene_manager::node::properties::{
@@ -87,10 +94,13 @@ pub mod input {
 
 pub mod physics {
     pub mod body;
+    pub mod model_shape;
     pub mod physics_resources;
+    pub mod shapes;
     pub mod world;
 
-    pub use body::{Collider, ColliderDebug, ColliderShape, Layers, Physics, RigidBodyData, Sensor};
+    pub use body::{Collider, ColliderDebug, Layers, Physics, RigidBodyData, Sensor};
+    pub use model_shape::ModelShape;
     pub use world::{PhysicsWorld, RayHit, SensorChange, SensorEvent};
 }
 

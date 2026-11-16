@@ -1,25 +1,28 @@
 //! A node's physics description - its `Physics` property: the body and its
-//! colliders (see scene_manager::physics_bridge).
+//! colliders (see scene_manager::physics_bridge, docs/colliders.md).
 
 use nalgebra::Vector3;
+use rapier3d::prelude::ColliderBuilder;
 
+use crate::asset_manager::Meshes;
+use crate::physics::model_shape::{ModelPlaceholder, ModelRef, ModelShape};
+use crate::scene_manager::node::properties::Model;
 use crate::ui::color::UiColor;
 
-/// One collider on a body: its `shape`, where it sits on the body, and how
-/// it touches things - see `Collider::new` and its builder methods.
+/// One collider on a body: Rapier's own `ColliderBuilder` - its shape,
+/// where it sits, how it touches things, anything Rapier lets a collider be
+/// - plus what only the engine knows: the layers a sensor `detects` and its
+/// `debug` look. `Physics::collider` and `Sensor::from` take a
+/// `ColliderBuilder` as it is; this is for those two extras:
+///
+///     Physics::fixed().collider(Collider::from(ColliderBuilder::cuboid(1.0, 1.0, 1.0)).debug(ColliderDebug::new()))
+///
+/// Its node's `Layers` set the builder's collision groups when the body is
+/// made - unless the builder already has groups of its own.
 #[derive(Debug, Clone)]
 pub struct Collider {
-    pub shape: ColliderShape,
-    /// Where its center is, from the body's - in the body's frame.
-    pub offset: Vector3<f32>,
-    /// How much it grips what it slides on: 0 none, 1 a lot. None: Rapier's
-    /// default (0.5).
-    pub friction: Option<f32>,
-    /// How much it bounces back: 0 not at all, 1 everything. None: Rapier's
-    /// default (0).
-    pub restitution: Option<f32>,
-    /// Detects what overlaps it without stopping anything - a trigger zone.
-    pub sensor: bool,
+    /// Rapier's collider, as it'll be built.
+    pub builder: ColliderBuilder,
     /// For a sensor: the layers (see `Layers`) of the nodes it detects -
     /// empty for every node.
     pub detects: Vec<String>,
@@ -29,36 +32,38 @@ pub struct Collider {
 }
 
 impl Collider {
-    /// A collider of `shape` at the body's center, touching things the
-    /// default way.
-    pub fn new(shape: ColliderShape) -> Self {
-        Self { shape, offset: Vector3::zeros(), friction: None, restitution: None, sensor: false, detects: Vec::new(), debug: None }
+    /// Rapier's collider shaped by `model`'s meshes - the ones `meshes`
+    /// picks - made into `shape`. Every Rapier setting chains onto it:
+    ///
+    ///     let table = Model::file("models/table.glb").hide_meshes(Meshes::prefix("col_"));
+    ///     Physics::dynamic(15.0)
+    ///         .collider(Collider::from_model(&table, Meshes::prefix("col_").each(), ModelShape::ConvexHull)
+    ///             .friction(0.6)
+    ///             .density(2.0))
+    ///
+    /// The file is read once, with its scene's other assets (see
+    /// `app.assets.collision_meshes`). When the node spawns, the meshes -
+    /// placed and scaled as the node draws them: the node's scale, the
+    /// model's `transform` - become the shape, merged into one, or one
+    /// collider apiece with `Meshes::each`; the settings stay. One that
+    /// can't be read or made is left out, saying why.
+    pub fn from_model(model: &Model, meshes: Meshes, shape: ModelShape) -> ColliderBuilder {
+        let model = match model.file_path() {
+            Some(path) => ModelRef::File { path: path.to_owned(), transform: model.transform },
+            None => ModelRef::NoFile,
+        };
+        ModelPlaceholder { model, meshes, shape }.into_builder()
     }
 
-    /// Placed `offset` from the body's center (in the body's frame).
-    pub fn offset(mut self, offset: Vector3<f32>) -> Self {
-        self.offset = offset;
-        self
+    /// `from_model` with its node's own `Model` file, whatever it is when
+    /// the node spawns.
+    pub fn from_own_model(meshes: Meshes, shape: ModelShape) -> ColliderBuilder {
+        ModelPlaceholder { model: ModelRef::Own, meshes, shape }.into_builder()
     }
 
-    /// Grips `friction` - it wins over what it touches when it's the lower
-    /// of the two, so 0 always slides.
-    pub fn friction(mut self, friction: f32) -> Self {
-        self.friction = Some(friction);
-        self
-    }
-
-    /// Bounces back `restitution` of its speed - it wins over what it
-    /// touches when it's the higher of the two.
-    pub fn restitution(mut self, restitution: f32) -> Self {
-        self.restitution = Some(restitution);
-        self
-    }
-
-    /// A trigger: detects overlaps, stops nothing.
-    pub fn sensor(mut self) -> Self {
-        self.sensor = true;
-        self
+    /// Whether it's a trigger (Rapier's `sensor`, see `Sensor`).
+    pub fn is_sensor(&self) -> bool {
+        self.builder.is_sensor
     }
 
     /// For a sensor: detects only nodes in one of `layers` (see `Layers`).
@@ -75,12 +80,19 @@ impl Collider {
     }
 }
 
+impl From<ColliderBuilder> for Collider {
+    /// Rapier's collider as it is.
+    fn from(builder: ColliderBuilder) -> Self {
+        Self { builder, detects: Vec::new(), debug: None }
+    }
+}
+
 /// How one collider is drawn for debugging (see `Collider::debug`,
 /// `Sensor::debug`): its edges and its faces, each in a color of its own or
 /// not at all - over everything, so it shows through walls. A sensor with
 /// something inside it uses the `occupied_` colors.
 ///
-///     Sensor::sphere(2.0).debug(ColliderDebug::new()
+///     Sensor::from(ColliderBuilder::ball(2.0)).debug(ColliderDebug::new()
 ///         .edges(UiColor::Rgb(255, 200, 0))
 ///         .faces(UiColor::Rgba(255, 200, 0, 40)))
 #[derive(Debug, Clone, Copy)]
@@ -158,72 +170,6 @@ impl ColliderDebug {
     }
 }
 
-impl From<ColliderShape> for Collider {
-    fn from(shape: ColliderShape) -> Self {
-        Self::new(shape)
-    }
-}
-
-/// A collider's shape - centered on where its `Collider` is.
-#[derive(Debug, Clone)]
-pub enum ColliderShape {
-    Cuboid { half_extents: (f32, f32, f32) },
-    Ball { radius: f32 },
-    // A standing capsule, centered on the body: a cylinder `half_height`
-    // above and below the center, capped by half-balls of `radius` - so
-    // `half_height + radius` from the center to each end. The usual shape for
-    // a character: its round bottom rides over small steps and edges instead
-    // of catching on them.
-    Capsule { half_height: f32, radius: f32 },
-    Cylinder { half_height: f32, radius: f32 },
-    HeightField { heights: Vec<Vec<f32>>, scale_x: f32, scale_y: f32 },
-    HalfSpace { normal: Vector3<f32> },
-    // Its shape taken from a model file's own triangles (its path in the
-    // assets folder) instead of a hand-authored primitive - just a
-    // reference. Resolved into a real `Trimesh` (below) by
-    // scene_manager::physics_bridge at spawn time, scaled by the node's own
-    // `Transform3D::scale` - a body is never made from this variant, only
-    // from the resolved one.
-    TrimeshFromModel { model_path: String },
-    // The resolved form of `TrimeshFromModel` - what a collider is
-    // actually built from.
-    // Meant for static bodies only (Rapier's own trimesh shape isn't
-    // reliable for anything dynamic sliding/rolling across sharp internal
-    // edges) - a good fit for irregular, concave static terrain (mountains,
-    // ...) that no primitive shape approximates well.
-    Trimesh { vertices: Vec<Vector3<f32>>, indices: Vec<[u32; 3]> },
-    // The smallest convex shape around a model file's points (its path in
-    // the assets folder) - resolved into a `ConvexHull` at spawn time, scaled
-    // like `TrimeshFromModel`. Solid inside, unlike a trimesh: the shape for
-    // a sensor read from a model, and fine on a moving body too.
-    ConvexHullFromModel { model_path: String },
-    // `ConvexHullFromModel` from the node's own `Model` file.
-    ConvexHullFromOwnModel,
-    // The smallest convex shape around `points` (in the body's frame) - a
-    // shape that follows an outline more closely than a box, still cheap
-    // and stable for a moving body.
-    ConvexHull { points: Vec<Vector3<f32>> },
-}
-
-impl ColliderShape {
-    /// Half a ball of `radius`, its flat side down on the center - a dome. A
-    /// `ConvexHull` around points on it.
-    pub fn hemisphere(radius: f32) -> Self {
-        const RINGS: usize = 6;
-        const SEGMENTS: usize = 16;
-        let mut points = vec![Vector3::y() * radius];
-        for ring in 0..RINGS {
-            // From the flat edge (0) up to just under the top.
-            let (rise, out) = (ring as f32 / RINGS as f32 * std::f32::consts::FRAC_PI_2).sin_cos();
-            for segment in 0..SEGMENTS {
-                let (sin, cos) = (segment as f32 / SEGMENTS as f32 * std::f32::consts::TAU).sin_cos();
-                points.push(Vector3::new(cos * out, rise, sin * out) * radius);
-            }
-        }
-        ColliderShape::ConvexHull { points }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct RigidBodyData {
     pub is_static: bool,
@@ -262,12 +208,56 @@ impl RigidBodyData {
     }
 }
 
+/// A node's body - its `Physics` property: a rigid body (`RigidBodyData`)
+/// and its colliders, Rapier's own (see docs/colliders.md):
+///
+///     Node::new("crate")
+///         .with_property(Transform3D::default())
+///         .with_property(Physics::dynamic(20.0)
+///             .collider(ColliderBuilder::cuboid(0.5, 0.5, 0.5).friction(0.7))
+///             .collider(Collider::from_own_model(Meshes::named(["handle"]), ModelShape::ConvexHull)))
 #[derive(Debug, Clone)]
 pub struct Physics {
-    pub rigidbody: RigidBodyData,
-    pub colliders: Vec<Collider>,
+    pub(crate) rigidbody: RigidBodyData,
+    pub(crate) colliders: Vec<Collider>,
 }
 
+impl Physics {
+    /// A body as `rigidbody` describes it, with no colliders yet - for one
+    /// with more settings than `dynamic`/`fixed` give:
+    ///
+    ///     Physics::new(RigidBodyData { lock_rotations: true, ..RigidBodyData::dynamic(70.0) })
+    pub fn new(rigidbody: RigidBodyData) -> Self {
+        Self { rigidbody, colliders: Vec::new() }
+    }
+
+    /// A moving body of `mass` kilograms.
+    pub fn dynamic(mass: f32) -> Self {
+        Self::new(RigidBodyData::dynamic(mass))
+    }
+
+    /// A body that never moves - the ground, walls.
+    pub fn fixed() -> Self {
+        Self::new(RigidBodyData::fixed())
+    }
+
+    /// One more collider: Rapier's `ColliderBuilder` (`Collider::from_model`
+    /// gives one too), or a `Collider` with the engine's extras.
+    pub fn collider(mut self, collider: impl Into<Collider>) -> Self {
+        self.colliders.push(collider.into());
+        self
+    }
+
+    /// Its rigid body's description.
+    pub fn rigidbody(&self) -> &RigidBodyData {
+        &self.rigidbody
+    }
+
+    /// Its colliders, in the order they were given.
+    pub fn colliders(&self) -> &[Collider] {
+        &self.colliders
+    }
+}
 
 /// A node's trigger zone - its `Sensor` property: a shape that detects the
 /// nodes with a body overlapping it, and stops nothing. Its node's behaviors
@@ -284,62 +274,25 @@ pub struct Physics {
 ///
 ///     Node::new("coin")
 ///         .with_property(Transform3D { position, ..Default::default() })
-///         .with_property(Sensor::sphere(1.0).detects(["player"]))
+///         .with_property(Sensor::from(ColliderBuilder::ball(1.0)).detects(["player"]))
 ///         .with_behavior(Coin);
 #[derive(Debug, Clone)]
 pub struct Sensor {
     pub collider: Collider,
 }
 
+impl From<ColliderBuilder> for Sensor {
+    /// A zone of Rapier's collider - any shape, `Collider::from_model`'s too
+    /// - made a sensor:
+    ///
+    ///     Sensor::from(ColliderBuilder::ball(1.5).translation(Vector3::y() * 1.5))
+    ///     Sensor::from(Collider::from_own_model(Meshes::all(), ModelShape::ConvexHull))
+    fn from(builder: ColliderBuilder) -> Self {
+        Self { collider: Collider::from(builder.sensor(true)) }
+    }
+}
+
 impl Sensor {
-    /// A zone of `shape` - any collider shape.
-    pub fn shape(shape: ColliderShape) -> Self {
-        Self { collider: Collider::new(shape).sensor() }
-    }
-
-    /// A ball of `radius` around the node.
-    pub fn sphere(radius: f32) -> Self {
-        Self::shape(ColliderShape::Ball { radius })
-    }
-
-    /// Half a ball of `radius`, its flat side down on the node - a dome.
-    pub fn hemisphere(radius: f32) -> Self {
-        Self::shape(ColliderShape::hemisphere(radius))
-    }
-
-    /// A box reaching `half_extents` from the node each way.
-    pub fn cuboid(half_extents: Vector3<f32>) -> Self {
-        Self::shape(ColliderShape::Cuboid { half_extents: (half_extents.x, half_extents.y, half_extents.z) })
-    }
-
-    /// A standing capsule (see `ColliderShape::Capsule`).
-    pub fn capsule(half_height: f32, radius: f32) -> Self {
-        Self::shape(ColliderShape::Capsule { half_height, radius })
-    }
-
-    /// A standing cylinder.
-    pub fn cylinder(half_height: f32, radius: f32) -> Self {
-        Self::shape(ColliderShape::Cylinder { half_height, radius })
-    }
-
-    /// The convex shape around the model at `model_path` (in the assets
-    /// folder), scaled like the node - a model's dents are filled in (a zone
-    /// shaped like an L is better made of boxes on child nodes).
-    pub fn from_model(model_path: impl Into<String>) -> Self {
-        Self::shape(ColliderShape::ConvexHullFromModel { model_path: model_path.into() })
-    }
-
-    /// `from_model` with the node's own `Model` file.
-    pub fn from_own_model() -> Self {
-        Self::shape(ColliderShape::ConvexHullFromOwnModel)
-    }
-
-    /// Placed `offset` from the node (in its frame).
-    pub fn offset(mut self, offset: Vector3<f32>) -> Self {
-        self.collider = self.collider.offset(offset);
-        self
-    }
-
     /// Detects only nodes in one of `layers` (see `Layers`) - every node
     /// with a body by default.
     pub fn detects<S: Into<String>>(mut self, layers: impl IntoIterator<Item = S>) -> Self {

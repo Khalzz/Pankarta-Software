@@ -333,7 +333,7 @@ impl PhysicsWorld {
         let mut loaded = HashMap::new();
         load_physics_from_definitions(std::slice::from_ref(&def), &mut self.colliders, &mut self.bodies, &mut loaded, &mut self.layers, &mut self.debugged);
         if let Some(Some(data)) = loaded.remove(&id) {
-            if def.physics.colliders.iter().any(|collider| collider.sensor) {
+            if def.physics.colliders.iter().any(|collider| collider.is_sensor()) {
                 self.sensors.insert(id.clone(), HashSet::new());
             }
             if def.follows_node {
@@ -540,6 +540,8 @@ fn draw_faces(faces: &mut Faces, pose: &Isometry3<f32>, shape: &dyn Shape, color
         ball.to_trimesh(ROUND, ROUND / 2)
     } else if let Some(cylinder) = shape.as_cylinder() {
         cylinder.to_trimesh(ROUND)
+    } else if let Some(cone) = shape.as_cone() {
+        cone.to_trimesh(ROUND)
     } else if let Some(capsule) = shape.as_capsule() {
         capsule.to_trimesh(ROUND, ROUND / 2)
     } else if let Some(hull) = shape.as_convex_polyhedron() {
@@ -559,6 +561,11 @@ fn draw_faces(faces: &mut Faces, pose: &Isometry3<f32>, shape: &dyn Shape, color
         (points, triangles)
     } else if let Some(mesh) = shape.as_trimesh() {
         (mesh.vertices().to_vec(), mesh.indices().to_vec())
+    } else if let Some(compound) = shape.as_compound() {
+        for (part_pose, part) in compound.shapes() {
+            draw_faces(faces, &(pose * part_pose), part.as_ref(), color);
+        }
+        return;
     } else {
         return;
     };
@@ -569,7 +576,8 @@ fn draw_faces(faces: &mut Faces, pose: &Isometry3<f32>, shape: &dyn Shape, color
 }
 
 /// `shape` at `pose` into `lines` - boxes as their 12 edges, balls as 3
-/// circles, cylinders and capsules as their circles and 8 sides, convex
+/// circles, cylinders, cones and capsules as their circles and 8 sides, compounds
+/// as their parts, convex
 /// hulls and triangle meshes as their edges. Other shapes aren't drawn.
 pub fn draw_shape(lines: &mut Lines, pose: &Isometry3<f32>, shape: &dyn Shape, color: [f32; 3]) {
     let world = |local: Vector3<f32>| (pose * Point3::from(local)).coords;
@@ -600,6 +608,18 @@ pub fn draw_shape(lines: &mut Lines, pose: &Isometry3<f32>, shape: &dyn Shape, c
             let (sin, cos) = (side as f32 / 8.0 * std::f32::consts::TAU).sin_cos();
             let side = Vector3::new(cos, 0.0, sin) * r;
             lines.line(world(side - Vector3::y() * h), world(side + Vector3::y() * h), color);
+        }
+    } else if let Some(cone) = shape.as_cone() {
+        // Its base circle and 8 lines up to the tip.
+        let (r, h) = (cone.radius, cone.half_height);
+        circle(lines, &world, -Vector3::y() * h, Vector3::x() * r, Vector3::z() * r, color);
+        for side in 0..8 {
+            let (sin, cos) = (side as f32 / 8.0 * std::f32::consts::TAU).sin_cos();
+            lines.line(world(Vector3::new(cos * r, -h, sin * r)), world(Vector3::y() * h), color);
+        }
+    } else if let Some(compound) = shape.as_compound() {
+        for (part_pose, part) in compound.shapes() {
+            draw_shape(lines, &(pose * part_pose), part.as_ref(), color);
         }
     } else if let Some(capsule) = shape.as_capsule() {
         // Its two ball centers, wherever along its axis they are.
@@ -650,7 +670,8 @@ fn circle(lines: &mut Lines, world: &dyn Fn(Vector3<f32>) -> Vector3<f32>, cente
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::physics::{Collider, ColliderShape, Physics, RigidBodyData, Sensor};
+    use crate::physics::{shapes, Physics, RigidBodyData, Sensor};
+    use rapier3d::prelude::ColliderBuilder;
 
     fn def(id: &str, position: Vector3<f32>, physics: Physics, layers: &[&str], follows_node: bool) -> PhysicsObjectDef {
         PhysicsObjectDef {
@@ -664,13 +685,13 @@ mod tests {
     }
 
     fn ball(id: &str, x: f32, layers: &[&str]) -> PhysicsObjectDef {
-        let physics = Physics { rigidbody: RigidBodyData::dynamic(1.0), colliders: vec![Collider::new(ColliderShape::Ball { radius: 0.25 })] };
+        let physics = Physics::dynamic(1.0).collider(ColliderBuilder::ball(0.25));
         def(id, Vector3::new(x, 5.0, 0.0), physics, layers, false)
     }
 
     fn zone(detects: &[&str]) -> PhysicsObjectDef {
-        let sensor = Sensor::cuboid(Vector3::new(3.0, 1.0, 3.0)).detects(detects.iter().copied());
-        def("zone", Vector3::zeros(), Physics { rigidbody: RigidBodyData::default(), colliders: vec![sensor.collider] }, &[], true)
+        let sensor = Sensor::from(ColliderBuilder::cuboid(3.0, 1.0, 3.0)).detects(detects.iter().copied());
+        def("zone", Vector3::zeros(), Physics::new(RigidBodyData::default()).collider(sensor.collider), &[], true)
     }
 
     /// Steps until the balls fell through the zone and out the bottom,
@@ -717,9 +738,9 @@ mod tests {
     #[test]
     fn debugged_collider_draws_with_no_view_on() {
         let mut world = PhysicsWorld::new();
-        let sensor = Sensor::sphere(1.0).debug(crate::physics::ColliderDebug::new());
+        let sensor = Sensor::from(ColliderBuilder::ball(1.0)).debug(crate::physics::ColliderDebug::new());
         world.start(vec![
-            def("zone", Vector3::zeros(), Physics { rigidbody: RigidBodyData::default(), colliders: vec![sensor.collider] }, &[], true),
+            def("zone", Vector3::zeros(), Physics::new(RigidBodyData::default()).collider(sensor.collider), &[], true),
             ball("rock", 10.0, &[]),
         ]);
         world.steps_due(0.0, false, false);
@@ -736,9 +757,9 @@ mod tests {
     #[test]
     fn hemisphere_is_only_the_top_half() {
         let mut world = PhysicsWorld::new();
-        let zone = Sensor::hemisphere(2.0);
+        let zone = Sensor::from(shapes::hemisphere(2.0));
         world.start(vec![
-            def("dome", Vector3::zeros(), Physics { rigidbody: RigidBodyData::default(), colliders: vec![zone.collider] }, &[], true),
+            def("dome", Vector3::zeros(), Physics::new(RigidBodyData::default()).collider(zone.collider), &[], true),
             ball("above", 0.0, &[]),
             ball("below", 0.0, &[]),
         ]);
@@ -752,10 +773,7 @@ mod tests {
 
     #[test]
     fn hemisphere_outline_has_no_lines_across_its_base() {
-        let shape = rapier3d::prelude::SharedShape::convex_hull(&match ColliderShape::hemisphere(2.0) {
-            ColliderShape::ConvexHull { points } => points.into_iter().map(Point3::from).collect::<Vec<_>>(),
-            _ => unreachable!(),
-        }).unwrap();
+        let shape = shapes::hemisphere(2.0).shape;
         let mut lines = Lines::default();
         draw_shape(&mut lines, &Isometry3::identity(), &*shape, [1.0; 3]);
         // On the ground, only the rim - no line through the inside of the base.

@@ -288,19 +288,13 @@ pub(crate) fn load_model_with(file_name: &str, read: &dyn Fn(&Path) -> anyhow::R
     })
 }
 
-/// Extracts a mesh's raw triangle geometry (world-space vertex positions +
-/// triangle indices, no GPU upload, no materials) from a `.gltf`/`.glb` file -
-/// for building a `ColliderShape::Trimesh` from a model's own
-/// shape instead of a hand-authored primitive (see that variant's own doc
-/// comment). Reads the file independently of `load_model_with`'s own
-/// GPU-facing load rather than reusing its result - a `Mesh` only keeps
-/// `wgpu::Buffer`s once loaded (see that struct's own fields), nothing
-/// CPU-readable survives to reuse here, so rendering + physics both wanting
-/// the same model means a small amount of duplicate file I/O, paid once at
-/// scene-construction time.
-pub fn load_trimesh_geometry(file_name: &str) -> anyhow::Result<(Vec<Vector3<f32>>, Vec<[u32; 3]>)> {
+/// Every mesh of a `.gltf`/`.glb` file as collision geometry - by its
+/// object's name (as `ModelMesh::name` has it), its points in the model's
+/// space (each object's place in the file applied) and its triangles. No
+/// GPU upload, no materials - see `CollisionMeshCache`.
+pub(crate) fn load_collision_meshes(file_name: &str) -> anyhow::Result<Vec<(String, Vec<Vector3<f32>>, Vec<[u32; 3]>)>> {
     let gltf_data = load_asset_binary(file_name)?;
-    let gltf = Gltf::from_slice(&gltf_data).unwrap();
+    let gltf = Gltf::from_slice(&gltf_data)?;
 
     let mut buffer_data = Vec::new();
     for buffer in gltf.buffers() {
@@ -313,34 +307,30 @@ pub fn load_trimesh_geometry(file_name: &str) -> anyhow::Result<(Vec<Vector3<f32
             gltf::buffer::Source::Uri(uri) => {
                 let file_dir = Path::new(file_name).parent().unwrap_or(Path::new(""));
                 let full_path = file_dir.join(uri);
-                let bin = load_asset_binary(full_path.to_str().unwrap())?;
+                let bin = load_asset_binary(full_path.to_str().unwrap_or_default())?;
                 buffer_data.push(bin);
             }
         }
     }
 
-    let mut vertices: Vec<Vector3<f32>> = Vec::new();
-    let mut indices: Vec<[u32; 3]> = Vec::new();
-
+    let mut meshes = Vec::new();
     for scene in gltf.scenes() {
         for node in scene.nodes() {
-            collect_trimesh_geometry(node, &buffer_data, None, &mut vertices, &mut indices);
+            collect_collision_meshes(node, &buffer_data, None, &mut meshes);
         }
     }
-
-    Ok((vertices, indices))
+    Ok(meshes)
 }
 
 // Recurses the same way traverse_node does (child transforms compose with
 // their parent's), but only ever touches positions/indices - no GPU device,
 // no materials, since this is only ever building collision geometry, not
 // anything rendered.
-fn collect_trimesh_geometry(
+fn collect_collision_meshes(
     node: gltf::Node<'_>,
     buffer_data: &[Vec<u8>],
     parent_transform: Option<(Vector3<f32>, UnitQuaternion<f32>, Vector3<f32>)>,
-    vertices: &mut Vec<Vector3<f32>>,
-    indices: &mut Vec<[u32; 3]>,
+    meshes: &mut Vec<(String, Vec<Vector3<f32>>, Vec<[u32; 3]>)>,
 ) {
     let (translation, rotation, scale) = node.transform().decomposed();
     let local_translation = Vector3::from(translation);
@@ -364,6 +354,10 @@ fn collect_trimesh_geometry(
     };
 
     if let Some(mesh) = node.mesh() {
+        // Named as traverse_node names it, so a mesh is called the same for
+        // drawing and for colliding.
+        let name = node.name().map(str::to_owned).unwrap_or_else(|| format!("node{}", node.index()));
+        let (mut vertices, mut indices) = (Vec::new(), Vec::new());
         for primitive in mesh.primitives() {
             let reader = primitive.reader(|buffer| Some(&buffer_data[buffer.index()]));
 
@@ -380,10 +374,11 @@ fn collect_trimesh_geometry(
                 }
             }
         }
+        meshes.push((name, vertices, indices));
     }
 
     for child in node.children() {
-        collect_trimesh_geometry(child, buffer_data, Some((world_translation, world_rotation, world_scale)), vertices, indices);
+        collect_collision_meshes(child, buffer_data, Some((world_translation, world_rotation, world_scale)), meshes);
     }
 }
 

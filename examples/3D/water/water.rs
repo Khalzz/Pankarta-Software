@@ -10,7 +10,8 @@
 
 use nalgebra::{Point3, Vector3};
 use pankarta_software::app::App;
-use pankarta_software::physics::{Collider, ColliderShape, Physics, RigidBodyData};
+use pankarta_software::physics::Physics;
+use pankarta_software::rapier3d::prelude::ColliderBuilder;
 use pankarta_software::input::source::{InputSource, Key};
 use pankarta_software::rendering::frame::FramePlan;
 use pankarta_software::scene_manager::behavior::Behavior;
@@ -134,10 +135,7 @@ fn crate_node(id: &str, position: Vector3<f32>, tilt: Vector3<f32>) -> Node {
     Node::new(id)
         .with_property(Transform3D { position, rotation: rotation_from_degrees(tilt), ..Default::default() })
         .with_property(Mesh::cube().transform(Transform3D { scale: half * 2.0, ..Default::default() }))
-        .with_property(Physics {
-            rigidbody: RigidBodyData::dynamic(600.0 * volume),
-            colliders: vec![Collider::new(ColliderShape::Cuboid { half_extents: (half.x, half.y, half.z) })],
-        })
+        .with_property(Physics::dynamic(600.0 * volume).collider(ColliderBuilder::cuboid(half.x, half.y, half.z)))
         .with_behavior(Buoyancy::new(half))
 }
 
@@ -147,10 +145,7 @@ fn post_node(id: &str, x: f32, z: f32) -> Node {
     Node::new(id)
         .with_property(Transform3D { position: Vector3::new(x, SEABED + half.y, z), ..Default::default() })
         .with_property(Mesh::cube().transform(Transform3D { scale: half * 2.0, ..Default::default() }))
-        .with_property(Physics {
-            rigidbody: RigidBodyData::fixed(),
-            colliders: vec![Collider::new(ColliderShape::Cuboid { half_extents: (half.x, half.y, half.z) })],
-        })
+        .with_property(Physics::fixed().collider(ColliderBuilder::cuboid(half.x, half.y, half.z)))
 }
 
 /// Circles the camera slowly around the middle of the sea.
@@ -198,10 +193,7 @@ impl SceneBehaviour for WaterScene {
         let seabed = Node::new("seabed")
             .with_property(Transform3D { position: Vector3::new(0.0, SEABED, 0.0), ..Default::default() })
             .with_property(Mesh::plane(0).transform(Transform3D { scale: Vector3::new(SEA_SIZE, 1.0, SEA_SIZE), ..Default::default() }))
-            .with_property(Physics {
-                rigidbody: RigidBodyData::fixed(),
-                colliders: vec![Collider::new(ColliderShape::HalfSpace { normal: Vector3::y() })],
-            });
+            .with_property(Physics::fixed().collider(ColliderBuilder::halfspace(Vector3::y_axis())));
 
         let focus = Node::new("focus").with_property(Transform3D::default());
         let camera = Node::new("camera")

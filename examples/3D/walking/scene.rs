@@ -10,8 +10,8 @@ use pankarta_software::ui::widgets::text;
 use pankarta_software::ui::TextStyle;
 
 use crate::player::Player;
-use crate::sign::sign_glass;
 use crate::sensor_gallery::{sensor_gallery, SENSORS};
+use crate::sign::sign_glass;
 use crate::zone::zone;
 
 pub struct WalkingScene {
@@ -22,7 +22,12 @@ pub struct WalkingScene {
 /// How much of the ambient light reaches a surface facing down (see
 /// Renderer::set_ambient_ground) - H steps through these to compare: 1 is
 /// flat (every way the same), lower darkens undersides and downward faces.
-const AMBIENT_GROUND_LEVELS: [(f32, &str); 4] = [(1.0, "flat"), (0.7, "light"), (0.45, "default"), (0.25, "strong")];
+const AMBIENT_GROUND_LEVELS: [(f32, &str); 4] = [
+    (1.0, "flat"),
+    (0.7, "light"),
+    (0.45, "default"),
+    (0.25, "strong"),
+];
 const DEFAULT_AMBIENT_GROUND: usize = 2;
 
 fn ambient_ground_text(level: usize) -> String {
@@ -46,12 +51,7 @@ const PLANE_NAME: &str = "plane_name";
 const PLANE_NAME_HEIGHT: f32 = 4.0;
 
 fn static_box(size: Vector3<f32>) -> Physics {
-    Physics {
-        rigidbody: RigidBodyData::fixed(),
-        colliders: vec![Collider::new(ColliderShape::Cuboid {
-            half_extents: (size.x / 2.0, size.y / 2.0, size.z / 2.0),
-        })],
-    }
+    Physics::fixed().collider(ColliderBuilder::cuboid(size.x / 2.0, size.y / 2.0, size.z / 2.0))
 }
 
 impl WalkingScene {
@@ -63,37 +63,57 @@ impl WalkingScene {
             .with_property(Transform3D::default())
             .with_property(
                 Mesh::plane(0)
-                    .transform(Transform3D { scale: Vector3::new(200.0, 1.0, 200.0), ..Default::default() })
-                    .material(Material::standard().texture(GROUND_TEXTURE).tiled(4.0, TextureSpace::World)),
+                    .transform(Transform3D {
+                        scale: Vector3::new(200.0, 1.0, 200.0),
+                        ..Default::default()
+                    })
+                    .material(
+                        Material::standard()
+                            .texture(GROUND_TEXTURE)
+                            .tiled(4.0, TextureSpace::World),
+                    ),
             )
-            .with_property(Physics {
-                rigidbody: RigidBodyData {
-                    is_static: true,
-                    mass: 0.0,
-                    ..Default::default()
-                },
-                colliders: vec![Collider::new(ColliderShape::HalfSpace {
-                    normal: Vector3::y(),
-                })],
-            });
+            .with_property(Physics::fixed().collider(ColliderBuilder::halfspace(Vector3::y_axis())));
 
+        // A big static jet to walk on: its exact surface, every mesh of the
+        // file merged into one triangle mesh - fine for a body that never
+        // moves.
+        let f16 = Model::file("models/f16.glb");
         let plane = Node::new("plane")
             .with_property(Transform3D {
                 position: Vector3::new(0.0, 2.0, 0.0),
                 scale: Vector3::new(14.0, 14.0, 14.0),
                 ..Default::default()
             })
-            .with_property(Physics {
-                rigidbody: RigidBodyData {
-                    is_static: true,
-                    mass: 0.0,
-                    ..Default::default()
-                },
-                colliders: vec![Collider::new(ColliderShape::TrimeshFromModel {
-                    model_path: "models/f16.glb".to_owned(),
-                })],
+            .with_property(Physics::fixed().collider(Collider::from_model(&f16, Meshes::all(), ModelShape::Trimesh)))
+            .with_property(f16);
+
+        // A small jet that falls and can be pushed around: a moving body
+        // can't use a triangle mesh, so each of its main parts is its own
+        // convex hull (`.each()`) - wings, tail and wheels stay apart instead
+        // of being wrapped into one blob. Its afterburner flame isn't drawn.
+        let toy_model = Model::file("models/f16.glb").hide_meshes(Meshes::named(["Afterburner"]));
+        let toy_parts = Meshes::named([
+            "MainBody.001",
+            "left_aleron",
+            "right_aleron",
+            "left_elevator",
+            "right_elevator",
+            "rudder_0",
+            "wheel-f",
+            "wheel-lb",
+            "wheel-rb",
+        ]);
+        let toy_jet = Node::new("toy_jet")
+            .with_property(Transform3D {
+                position: Vector3::new(10.0, 6.0, -12.0),
+                rotation: UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 0.6),
+                scale: Vector3::new(3.0, 3.0, 3.0),
             })
-            .with_property(Model::file("models/f16.glb"));
+            .with_property(Physics::dynamic(40.0).collider(
+                Collider::from_model(&toy_model, toy_parts.each(), ModelShape::ConvexHull).friction(0.8),
+            ))
+            .with_property(toy_model);
 
         let player = Node::new("player").with_behavior(Player::new(Vector3::new(
             0.0,
@@ -111,7 +131,7 @@ impl WalkingScene {
         // Walk onto it - see zone.rs.
         let pad = zone("zone", Vector3::new(-4.0, 0.0, -6.0));
 
-        let mut nodes = vec![ground, player, plane, sun, glass, pad];
+        let mut nodes = vec![ground, player, plane, toy_jet, sun, glass, pad];
         // Sensors of every shape, outside the cubes - see sensor_gallery.rs.
         nodes.extend(sensor_gallery());
 
@@ -131,8 +151,15 @@ impl WalkingScene {
                     })
                     .with_property(
                         Mesh::cube()
-                            .transform(Transform3D { scale: size, ..Default::default() })
-                            .material(Material::standard().texture(CUBE_TEXTURES[index % 4]).tiled(1.0, TextureSpace::Object)),
+                            .transform(Transform3D {
+                                scale: size,
+                                ..Default::default()
+                            })
+                            .material(
+                                Material::standard()
+                                    .texture(CUBE_TEXTURES[index % 4])
+                                    .tiled(1.0, TextureSpace::Object),
+                            ),
                     )
                     .with_property(static_box(size)),
             );
@@ -150,12 +177,21 @@ impl WalkingScene {
         let hud = Node::new("hud").with_property(UiLayer::new(
             UiNode::container()
                 .set_child("framerate", framerate)
-                .set_child("ambient_ground", text(&ambient_ground_text(DEFAULT_AMBIENT_GROUND), &TextStyle::default())
+                .set_child(
+                    "ambient_ground",
+                    text(
+                        &ambient_ground_text(DEFAULT_AMBIENT_GROUND),
+                        &TextStyle::default(),
+                    )
                     .set_padding((10.0, 4.0))
-                    .set_size(SizeValue::Pixels(500.0), SizeValue::Fit))
-                .set_child("zone", text("", &TextStyle::default())
-                    .set_padding((10.0, 4.0))
-                    .set_size(SizeValue::Pixels(500.0), SizeValue::Fit)),
+                    .set_size(SizeValue::Pixels(500.0), SizeValue::Fit),
+                )
+                .set_child(
+                    "zone",
+                    text("", &TextStyle::default())
+                        .set_padding((10.0, 4.0))
+                        .set_size(SizeValue::Pixels(500.0), SizeValue::Fit),
+                ),
         ));
         if let Err(error) = scene.spawn_node(app, hud) {
             eprintln!("{error}");
@@ -173,8 +209,11 @@ impl WalkingScene {
             .text(PLANE_NAME);
 
         app.window.set_cursor_locked(true);
-        app.renderer.set_ambient_ground(AMBIENT_GROUND_LEVELS[DEFAULT_AMBIENT_GROUND].0);
-        Self { ambient_ground: DEFAULT_AMBIENT_GROUND }
+        app.renderer
+            .set_ambient_ground(AMBIENT_GROUND_LEVELS[DEFAULT_AMBIENT_GROUND].0);
+        Self {
+            ambient_ground: DEFAULT_AMBIENT_GROUND,
+        }
     }
 }
 
@@ -182,7 +221,8 @@ impl SceneBehaviour for WalkingScene {
     fn update(&mut self, scene: &mut Scene, app: &mut App, _ctx: &mut FrameContext) {
         if app.input.is_just_pressed(InputSource::key(Key::H)) {
             self.ambient_ground = (self.ambient_ground + 1) % AMBIENT_GROUND_LEVELS.len();
-            app.renderer.set_ambient_ground(AMBIENT_GROUND_LEVELS[self.ambient_ground].0);
+            app.renderer
+                .set_ambient_ground(AMBIENT_GROUND_LEVELS[self.ambient_ground].0);
         }
         if let Some(ui) = scene
             .get_node_mut("hud")
@@ -196,14 +236,19 @@ impl SceneBehaviour for WalkingScene {
                 label.set_text(ambient_ground_text(self.ambient_ground));
             }
             if let Some(label) = ui.label_mut("zone") {
-                let mut inside: Vec<&str> = SENSORS.iter()
+                let mut inside: Vec<&str> = SENSORS
+                    .iter()
                     .filter(|(id, _)| app.physics.is_inside(id, "player"))
                     .map(|(_, name)| *name)
                     .collect();
                 if app.physics.is_inside("zone", "player") {
                     inside.push("blue zone");
                 }
-                label.set_text(if inside.is_empty() { String::new() } else { format!("Inside: {}", inside.join(", ")) });
+                label.set_text(if inside.is_empty() {
+                    String::new()
+                } else {
+                    format!("Inside: {}", inside.join(", "))
+                });
             }
         }
 

@@ -11,7 +11,6 @@ use crate::rendering::enviroment::environment::{prepare_environment, Environment
 use crate::rendering::frame::FramePlan;
 use crate::rendering::models::model::Mesh;
 use crate::rendering::render_sets::RenderSets;
-use crate::scene_manager::physics_bridge;
 use crate::scene_manager::scene::Scene;
 
 use super::assets::{LoadedAssets, UsedAssets};
@@ -78,7 +77,7 @@ impl PendingSceneLoad {
 /// What the loading thread has to load for one scene.
 pub(crate) struct LoadList {
     pub models: Vec<ModelLoad>,
-    pub trimeshes: Vec<String>,
+    pub collision_meshes: Vec<String>,
     pub images: Vec<String>,
     pub textures: Vec<String>,
     pub environment: Option<Environment>,
@@ -86,7 +85,7 @@ pub(crate) struct LoadList {
 
 impl LoadList {
     pub(crate) fn len(&self) -> usize {
-        self.models.len() + self.trimeshes.len() + self.images.len() + self.textures.len() + self.environment.is_some() as usize
+        self.models.len() + self.collision_meshes.len() + self.images.len() + self.textures.len() + self.environment.is_some() as usize
     }
 }
 
@@ -115,11 +114,11 @@ pub(crate) fn start_loading(app: &App, name: &str, scene: Scene, settings: Setti
                 (key, model)
             })
             .collect();
-        let trimeshes = list.trimeshes.into_iter()
+        let collision_meshes = list.collision_meshes.into_iter()
             .map(|path| {
                 reporter.step(format!("Collider {path}"));
-                let mesh = physics_bridge::load_trimesh(&path);
-                (path, mesh)
+                let meshes = crate::asset_manager::collision::read_file(&path);
+                (path, meshes)
             })
             .collect();
         let images = list.images.into_iter()
@@ -142,7 +141,7 @@ pub(crate) fn start_loading(app: &App, name: &str, scene: Scene, settings: Setti
             (environment, prepared)
         });
         reporter.finish();
-        let _ = tx.send(LoadedAssets { models, trimeshes, images, textures, environment });
+        let _ = tx.send(LoadedAssets { models, collision_meshes, images, textures, environment });
     });
 
     PendingSceneLoad { scene, settings, uses, frame, receiver: Some(rx), progress: Some(progress_rx), ready: None, done: 0, total }

@@ -8,7 +8,8 @@
 //! - a small sphere just over head height (jump into it), and one that
 //!   moves around.
 
-use nalgebra::{UnitQuaternion, Vector3};
+use nalgebra::{Point3, UnitQuaternion, Vector3};
+use pankarta_software::physics::shapes;
 use pankarta_software::prelude::*;
 
 /// How far out the ring is - the cubes are at 12.
@@ -31,26 +32,25 @@ pub const SENSORS: [(&str, &str); 8] = [
 
 /// Every sensor of the gallery.
 pub fn sensor_gallery() -> Vec<Node> {
-    let pyramid = ColliderShape::ConvexHull {
-        points: vec![
-            Vector3::new(-1.5, 0.0, -1.5),
-            Vector3::new(1.5, 0.0, -1.5),
-            Vector3::new(1.5, 0.0, 1.5),
-            Vector3::new(-1.5, 0.0, 1.5),
-            Vector3::new(0.0, 3.0, 0.0),
-        ],
-    };
+    let pyramid = ColliderBuilder::convex_hull(&[
+        Point3::new(-1.5, 0.0, -1.5),
+        Point3::new(1.5, 0.0, -1.5),
+        Point3::new(1.5, 0.0, 1.5),
+        Point3::new(-1.5, 0.0, 1.5),
+        Point3::new(0.0, 3.0, 0.0),
+    ])
+    .expect("a pyramid has a hull");
     let up = |height: f32| Vector3::y() * height;
     let sensors = [
-        Sensor::sphere(1.5).offset(up(1.5)),
-        Sensor::hemisphere(2.2),
-        Sensor::cuboid(Vector3::new(2.5, 1.0, 1.0)).offset(up(1.0)),
+        Sensor::from(ColliderBuilder::ball(1.5).translation(up(1.5))),
+        Sensor::from(shapes::hemisphere(2.2)),
+        Sensor::from(ColliderBuilder::cuboid(2.5, 1.0, 1.0).translation(up(1.0))),
         // Standing, its node turned to lay it down.
-        Sensor::capsule(1.5, 0.8),
-        Sensor::cylinder(1.0, 1.8).offset(up(1.0)),
-        Sensor::shape(pyramid),
-        Sensor::sphere(0.7),
-        Sensor::sphere(1.2).offset(up(1.2)),
+        Sensor::from(ColliderBuilder::capsule_y(1.5, 0.8)),
+        Sensor::from(ColliderBuilder::cylinder(1.0, 1.8).translation(up(1.0))),
+        Sensor::from(pyramid),
+        Sensor::from(ColliderBuilder::ball(0.7)),
+        Sensor::from(ColliderBuilder::ball(1.2).translation(up(1.2))),
     ];
     let colors = [
         UiColor::Rgb(255, 80, 80),

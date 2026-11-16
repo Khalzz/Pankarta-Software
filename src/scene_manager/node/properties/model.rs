@@ -3,6 +3,7 @@ use std::borrow::Cow;
 use nalgebra::{UnitQuaternion, Vector3};
 
 use crate::asset_manager::models::{self, DoubleSidedMeshes, ModelSource};
+use crate::asset_manager::Meshes;
 use crate::asset_manager::normalize;
 use crate::rendering::models::model as loaded;
 
@@ -25,6 +26,9 @@ pub struct ModelMesh {
     pub transform: Transform3D,
     /// `false` hides it, and its shadow.
     pub visible: bool,
+    /// Whether it's shown to begin with - not when its `Model` hides it
+    /// (see `Model::hide_meshes`).
+    shown: bool,
 }
 
 impl ModelMesh {
@@ -50,15 +54,16 @@ impl ModelMesh {
         self.transform.rotation = self.original.rotation * rotation;
     }
 
-    /// Back where the file put it, and shown.
+    /// Back where the file put it, and shown (unless its `Model` hides it,
+    /// see `Model::hide_meshes`).
     pub fn reset(&mut self) {
         self.transform = self.original;
-        self.visible = true;
+        self.visible = self.shown;
     }
 
     /// Moved, turned, scaled or hidden since the file put it there.
     fn changed(&self) -> bool {
-        !self.visible
+        self.visible != self.shown
             || self.transform.position != self.original.position
             || self.transform.rotation != self.original.rotation
             || self.transform.scale != self.original.scale
@@ -95,6 +100,8 @@ pub struct Model {
     pub receives_shadows: bool,
     double_sided: DoubleSidedMeshes,
     variant: Option<String>,
+    /// The file's meshes it doesn't draw (see `hide_meshes`).
+    hidden: Option<Meshes>,
     /// The file's meshes, by name - read once the file is loaded (see
     /// `mesh_mut`).
     meshes: Vec<ModelMesh>,
@@ -124,6 +131,7 @@ impl Model {
             receives_shadows: true,
             double_sided: DoubleSidedMeshes::None,
             variant: None,
+            hidden: None,
             meshes: Vec::new(),
             meshes_read: false,
             own_copy: false,
@@ -133,6 +141,23 @@ impl Model {
     /// The model file (`.glb`/`.gltf`) at `path` in the assets folder.
     pub fn file(path: impl Into<String>) -> Self {
         Self { file: Some(normalize(&path.into())), ..Self::new() }
+    }
+
+    /// Doesn't draw the file's meshes `meshes` picks - nor their shadows: a
+    /// collision mesh modeled in the same file (see `Collider::from_model`).
+    ///
+    ///     Model::file("models/table.glb").hide_meshes(Meshes::prefix("col_"))
+    ///
+    /// Every node hiding the same meshes of a file shares one copy of it
+    /// (see `variant`); `ModelMesh::visible` still shows one again.
+    pub fn hide_meshes(mut self, meshes: Meshes) -> Self {
+        self.hidden = Some(meshes);
+        self
+    }
+
+    /// The file's meshes it doesn't draw (see `hide_meshes`).
+    pub fn hidden_meshes(&self) -> Option<&Meshes> {
+        self.hidden.as_ref()
     }
 
     /// Adds `mesh` as the part `name` (replacing one with that name).
@@ -261,13 +286,17 @@ impl Model {
             let (low, high) = (Vector3::from(mesh.local_bounds.0), Vector3::from(mesh.local_bounds.1));
             match meshes.iter_mut().find(|known| known.name == name) {
                 Some(known) => known.bounds = (known.bounds.0.inf(&low), known.bounds.1.sup(&high)),
-                None => meshes.push(ModelMesh {
-                    name: name.to_owned(),
-                    original: mesh.base_transform,
-                    bounds: (low, high),
-                    transform: mesh.base_transform,
-                    visible: true,
-                }),
+                None => {
+                    let shown = !self.hidden.as_ref().is_some_and(|hidden| hidden.matches(name));
+                    meshes.push(ModelMesh {
+                        name: name.to_owned(),
+                        original: mesh.base_transform,
+                        bounds: (low, high),
+                        transform: mesh.base_transform,
+                        visible: shown,
+                        shown,
+                    })
+                }
             }
         }
         meshes.sort_by(|a, b| a.name.cmp(&b.name));
@@ -320,17 +349,15 @@ impl Model {
                 Some(Cow::Owned(material))
             }
         };
-        let variant = match self.own_copy {
-            true => Some(Cow::Owned(own_variant(node))),
-            false => self.variant.as_deref().map(Cow::Borrowed),
+        // Hiding meshes takes a copy of the file of its own, shared by every
+        // node hiding the same ones - unless it has a variant already.
+        let variant = match (self.own_copy, &self.variant, &self.hidden) {
+            (true, _, _) => Some(Cow::Owned(own_variant(node))),
+            (false, Some(variant), _) => Some(Cow::Borrowed(variant.as_str())),
+            (false, None, Some(hidden)) => Some(Cow::Owned(format!("hide:{}", hidden.describe()))),
+            (false, None, None) => None,
         };
         Some((ModelSource::File(path.clone()), &self.double_sided, variant, material))
-    }
-
-    /// How much bigger than its node it's drawn - for colliders read from
-    /// its file.
-    pub(crate) fn scale(&self) -> Vector3<f32> {
-        self.transform.scale
     }
 }
 
@@ -354,6 +381,7 @@ mod tests {
             bounds: (Vector3::zeros(), Vector3::zeros()),
             transform: Transform3D::default(),
             visible: true,
+            shown: true,
         }).collect();
         model.meshes.sort_by(|a, b| a.name.cmp(&b.name));
         model.meshes_read = true;

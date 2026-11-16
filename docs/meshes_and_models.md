@@ -143,7 +143,7 @@ The hex color is converted to linear, so it matches what the same hex looks like
 
 - **A `Material` put directly on a node isn't used any more.** Give it to the `Mesh` or `Model` with `.material(..)`. The engine prints a warning when a node still has one.
 - **One node can be several drawn instances.** A file model is drawn under the node's id. Each added part is drawn under `"node#part"`. This is internal, but it shows up in shader material keys.
-- **Physics colliders read from a model file** (`TrimeshFromModel`) are scaled by the node's scale times the model's `transform.scale`, just as they were scaled by `.scaled(..)` before.
+- **Physics colliders read from a model file** (`Collider::from_model`) are placed and scaled as the node draws the model: by the node's scale and the model's `transform`. See [colliders.md](colliders.md).
 - **Not done yet:** a `Mesh` that is one single mesh taken out of a file (e.g. only the F-16's wing). For now, use the whole file as a `Model` and change its meshes' materials with `part_material`, and move or hide them with `mesh_mut` (see "The file's own meshes").
 
 ---

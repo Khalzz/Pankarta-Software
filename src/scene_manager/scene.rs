@@ -12,7 +12,7 @@ use crate::scene_manager::node::properties::{
 };
 use crate::scene_manager::node::Node;
 use crate::scene_manager::loading::assets::SceneAssets;
-use crate::scene_manager::physics_bridge::{self, TrimeshCache};
+use crate::scene_manager::physics_bridge;
 use crate::scene_manager::render_bridge;
 use crate::scene_manager::scene_access::{SceneAccess, SceneChanges};
 use crate::scene_manager::scene_nodes::{child_id, SceneNodes};
@@ -135,6 +135,8 @@ pub struct Scene {
     pending_spawns: Vec<String>,
     /// Models named with `will_use` - loaded with the scene's own.
     extra_models: Vec<NodeModelProperty>,
+    /// Model files read for colliders with it (see `will_use_collision_meshes`).
+    extra_collision_meshes: Vec<String>,
 }
 
 impl Scene {
@@ -154,6 +156,7 @@ impl Scene {
             pending_bodies: Vec::new(),
             pending_spawns: Vec::new(),
             extra_models: Vec::new(),
+            extra_collision_meshes: Vec::new(),
         }
     }
 
@@ -266,7 +269,7 @@ impl Scene {
 
         if has_physics {
             if self.started {
-                physics_bridge::register_physics_body(self, &id, &TrimeshCache::new())?;
+                physics_bridge::register_physics_body(self, &id, &mut app.assets.collision_meshes)?;
             } else {
                 self.pending_bodies.push(id.clone());
             }
@@ -322,11 +325,21 @@ impl Scene {
         self.extra_models.push(model.into());
     }
 
+    /// Has `model`'s file read for colliders with the scene - for a node
+    /// spawned later with a `Collider::from_model` of it, so spawning it
+    /// doesn't read the file then. Kept in `app.assets.collision_meshes`
+    /// while the game runs.
+    pub fn will_use_collision_meshes(&mut self, model: &crate::scene_manager::node::properties::Model) {
+        if let Some(path) = model.file_path() {
+            self.extra_collision_meshes.push(path.to_owned());
+        }
+    }
+
     pub(crate) fn assets_to_load(&self, app: &App) -> SceneAssets {
         let mut assets = SceneAssets {
             models: Vec::new(),
             keys: HashSet::new(),
-            trimeshes: Vec::new(),
+            collision_meshes: Vec::new(),
             textures: Vec::new(),
         };
         let mut loads = Vec::new();
@@ -371,27 +384,29 @@ impl Scene {
             let Some(node) = self.content.nodes.get(id) else {
                 continue;
             };
-            for path in physics_bridge::trimesh_paths(node) {
-                if !assets.trimeshes.iter().any(|known| known == path) {
-                    assets.trimeshes.push(path.to_owned());
-                }
+            for path in physics_bridge::collision_mesh_paths(node) {
+                add_collision_meshes(&mut assets, app, path);
             }
+        }
+        for path in &self.extra_collision_meshes {
+            add_collision_meshes(&mut assets, app, path);
         }
         assets
     }
 
-    pub(crate) fn finish_loading(&mut self, app: &mut App, trimeshes: &TrimeshCache) {
+    pub(crate) fn finish_loading(&mut self, app: &mut App) {
         for id in std::mem::take(&mut self.pending_models) {
             if let Err(error) = render_bridge::register_static_model(self, app, &id) {
                 eprintln!("node '{id}': {error}");
             }
         }
         for id in std::mem::take(&mut self.pending_bodies) {
-            if let Err(error) = physics_bridge::register_physics_body(self, &id, trimeshes) {
+            if let Err(error) = physics_bridge::register_physics_body(self, &id, &mut app.assets.collision_meshes) {
                 eprintln!("node '{id}': {error}");
             }
         }
         self.extra_models.clear();
+        self.extra_collision_meshes.clear();
     }
 
     /// Every image path its nodes' `UiLayer`s draw - loaded with its other
@@ -552,9 +567,9 @@ impl Scene {
 
     /// The scene starts: its nodes' `on_spawn`, then its own - each with
     /// what they set up (a model, a body) registered right after.
-    pub(crate) fn run_on_spawn(&mut self, app: &mut App, trimeshes: &TrimeshCache) {
+    pub(crate) fn run_on_spawn(&mut self, app: &mut App) {
         self.run_node_spawns(app);
-        self.finish_loading(app, trimeshes);
+        self.finish_loading(app);
 
         if let Some(mut behaviour) = self.behaviour.take() {
             behaviour.on_spawn(self, app);
@@ -562,7 +577,7 @@ impl Scene {
         }
 
         self.run_node_spawns(app);
-        self.finish_loading(app, trimeshes);
+        self.finish_loading(app);
         self.started = true;
     }
 
@@ -658,5 +673,13 @@ impl Scene {
             behaviour.on_origin_shift(self, app, shift);
             self.behaviour = Some(behaviour);
         }
+    }
+}
+
+/// Has the file at `path` read for colliders with the scene, unless it's
+/// read already or queued.
+fn add_collision_meshes(assets: &mut SceneAssets, app: &App, path: &str) {
+    if !app.assets.collision_meshes.is_loaded(path) && !assets.collision_meshes.iter().any(|known| known == path) {
+        assets.collision_meshes.push(path.to_owned());
     }
 }

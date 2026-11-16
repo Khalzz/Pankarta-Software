@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use wgpu::BindGroupLayout;
 
+use super::collision::CollisionMeshCache;
 use super::folder::{asset_path, AssetFolder, DEFAULT_ROOT};
 use super::images::ImageCache;
 use super::models::{DoubleSidedMeshes, MeshData, ModelCache, ModelLoad, ModelSource};
@@ -29,6 +30,9 @@ pub struct AssetManager {
     pub images: ImageCache,
     pub sounds: SoundCache,
     pub textures: TextureCache,
+    /// Collision geometry read from model files (see
+    /// `Collider::from_model`).
+    pub collision_meshes: CollisionMeshCache,
 }
 
 impl AssetManager {
@@ -41,6 +45,7 @@ impl AssetManager {
             images: ImageCache::new(image_layout),
             sounds: SoundCache::default(),
             textures: TextureCache::new(texture_layout),
+            collision_meshes: CollisionMeshCache::default(),
         }
     }
 

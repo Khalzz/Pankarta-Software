@@ -29,6 +29,14 @@ const AMBIENT_GROUND_LEVELS: [(f32, &str); 4] = [
 ];
 const DEFAULT_AMBIENT_GROUND: usize = 2;
 
+fn physics_debug_text(gizmos: PhysicsGizmos) -> String {
+    let on: Vec<&str> = [(gizmos.colliders, "colliders"), (gizmos.sensors, "sensors"), (gizmos.rigidbodies, "bodies")]
+        .into_iter()
+        .filter_map(|(on, name)| on.then_some(name))
+        .collect();
+    format!("F5: physics gizmos ({})", if on.is_empty() { "off".to_owned() } else { on.join(", ") })
+}
+
 fn ambient_ground_text(level: usize) -> String {
     let (value, name) = AMBIENT_GROUND_LEVELS[level];
     format!("H: ambient from below ({name}, {value})")
@@ -284,6 +292,12 @@ impl WalkingScene {
                     .set_size(SizeValue::Pixels(500.0), SizeValue::Fit),
                 )
                 .set_child(
+                    "physics_debug",
+                    text(&physics_debug_text(app.renderer.debug.physics), &TextStyle::default())
+                        .set_padding((10.0, 4.0))
+                        .set_size(SizeValue::Pixels(500.0), SizeValue::Fit),
+                )
+                .set_child(
                     "zone",
                     text("", &TextStyle::default())
                         .set_padding((10.0, 4.0))
@@ -321,6 +335,11 @@ impl SceneBehaviour for WalkingScene {
             app.renderer
                 .set_ambient_ground(AMBIENT_GROUND_LEVELS[self.ambient_ground].0);
         }
+        // Every collider (fixed ones dimmer), the sensors (green while
+        // something's inside), each body's center of mass and velocity.
+        if app.input.is_just_pressed(InputSource::key(Key::F5)) {
+            app.renderer.debug.physics.toggle_all();
+        }
         if let Some(ui) = scene
             .get_node_mut("hud")
             .and_then(|node| node.get_property_mut::<UiLayer>())
@@ -331,6 +350,9 @@ impl SceneBehaviour for WalkingScene {
             }
             if let Some(label) = ui.label_mut("ambient_ground") {
                 label.set_text(ambient_ground_text(self.ambient_ground));
+            }
+            if let Some(label) = ui.label_mut("physics_debug") {
+                label.set_text(physics_debug_text(app.renderer.debug.physics));
             }
             if let Some(label) = ui.label_mut("zone") {
                 let inside: Vec<&str> = SENSORS

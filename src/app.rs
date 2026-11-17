@@ -778,9 +778,9 @@ impl App {
                     if self.origin.has_pending() {
                         self.update_origin(&mut scene, false);
                     }
-                    // Every moving body's colliders, for the debug view - after
-                    // the behaviors, which may have moved one.
-                    self.physics.draw_colliders();
+                    // The physics gizmos that are on - after the behaviors,
+                    // which may have moved a body.
+                    self.physics.draw_gizmos();
 
                     // The animation's turn, after the behaviors - then the
                     // hierarchy (children onto their parents, LookAt nodes
@@ -905,7 +905,7 @@ impl App {
     }
 
     fn run_physics(&mut self, scene: &mut Scene) {
-        let steps = self.physics.steps_due(self.time.delta_time, self.renderer.debug.physics, self.renderer.debug.sensors);
+        let steps = self.physics.steps_due(self.time.delta_time, self.renderer.debug.physics);
         for _ in 0..steps {
             self.input.begin_fixed_step();
             let mut changes = SceneChanges::default();

@@ -32,6 +32,45 @@ use crate::physics::body::{ColliderDebug, Outline};
 use crate::physics::physics_resources::{load_physics_from_definitions, LayerBits, PhysicsObjectDef};
 use crate::rendering::lines::{Faces, Lines};
 
+/// Which physics gizmos are drawn - `app.renderer.debug.physics`, all off
+/// by default:
+///
+///     app.renderer.debug.physics.colliders = true;       // one gizmo
+///     app.renderer.debug.physics = PhysicsGizmos::all(); // every one
+///     app.renderer.debug.physics.toggle_all();           // all on, or all off if any is on
+///
+/// A collider with its own `ColliderDebug` is drawn whatever's on here.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PhysicsGizmos {
+    /// Every collider that isn't a sensor: moving bodies' in orange, fixed
+    /// ones' (the ground, the level) in a dim blue-gray.
+    pub colliders: bool,
+    /// Every sensor's area - cyan, green while something overlaps it.
+    pub sensors: bool,
+    /// Every dynamic body's center of mass, its axes along the body's
+    /// principal axes of inertia (gray while it's asleep), and its velocity
+    /// in yellow - plus what the game draws into `PhysicsWorld::debug_lines`.
+    pub rigidbodies: bool,
+}
+
+impl PhysicsGizmos {
+    /// Every gizmo on.
+    pub fn all() -> Self {
+        Self { colliders: true, sensors: true, rigidbodies: true }
+    }
+
+    /// Whether any gizmo is on.
+    pub fn any(&self) -> bool {
+        self.colliders || self.sensors || self.rigidbodies
+    }
+
+    /// Every gizmo off if any is on, every one on if none is - for a key
+    /// that switches the physics debug view.
+    pub fn toggle_all(&mut self) {
+        *self = if self.any() { Self::default() } else { Self::all() };
+    }
+}
+
 /// What a ray hit - see `PhysicsWorld::cast_ray`.
 #[derive(Debug, Clone)]
 pub struct RayHit {
@@ -90,11 +129,8 @@ pub struct PhysicsWorld {
     /// Scaled time passed that no step has used up yet.
     accumulator: f32,
     running: bool,
-    /// Whether the physics debug view is on (`app.renderer.debug.physics`) -
-    /// see `debug_lines`.
-    debug_view: bool,
-    /// Whether the sensors' debug view is on (`app.renderer.debug.sensors`).
-    sensor_view: bool,
+    /// The physics gizmos that are on (`app.renderer.debug.physics`).
+    gizmos: PhysicsGizmos,
     lines: Lines,
     /// Debugged colliders' faces (see `ColliderDebug`), drawn this frame.
     faces: Faces,
@@ -140,8 +176,7 @@ impl PhysicsWorld {
             previous: HashMap::new(),
             accumulator: 0.0,
             running: false,
-            debug_view: false,
-            sensor_view: false,
+            gizmos: PhysicsGizmos::default(),
             lines: Lines::default(),
             faces: Faces::default(),
             debugged: HashMap::new(),
@@ -329,11 +364,12 @@ impl PhysicsWorld {
         }
     }
 
-    /// Lines for the physics debug view, in world space - `None` while the
-    /// view is off (`app.renderer.debug.physics`), so nothing's drawn for
-    /// nobody. Emptied every frame: draw them again every frame.
+    /// Lines a game draws for its bodies - forces, pushes - in world space,
+    /// shown with the bodies' gizmos: `None` while
+    /// `app.renderer.debug.physics.rigidbodies` is off, so nothing's drawn
+    /// for nobody. Emptied every frame: draw them again every frame.
     pub fn debug_lines(&mut self) -> Option<&mut Lines> {
-        self.debug_view.then_some(&mut self.lines)
+        self.gizmos.rigidbodies.then_some(&mut self.lines)
     }
 
     pub(crate) fn lines(&self) -> &Lines {
@@ -401,9 +437,8 @@ impl PhysicsWorld {
 
     /// Adds a frame's `elapsed` (scaled) seconds, and says how many steps
     /// are due now.
-    pub(crate) fn steps_due(&mut self, elapsed: f32, debug_view: bool, sensor_view: bool) -> u32 {
-        self.debug_view = debug_view;
-        self.sensor_view = sensor_view;
+    pub(crate) fn steps_due(&mut self, elapsed: f32, gizmos: PhysicsGizmos) -> u32 {
+        self.gizmos = gizmos;
         self.lines.clear();
         self.faces.clear();
         if !self.running {
@@ -492,17 +527,16 @@ impl PhysicsWorld {
         })
     }
 
-    /// Every moving body's colliders, into the debug lines where they're
-    /// drawn this frame - static ones (the ground) skipped, they'd bury the
-    /// screen - and every sensor, cyan, green while something overlaps it.
-    /// While the physics debug view is on - or just the sensors, while
-    /// theirs is. A collider with its own `ColliderDebug` is drawn its own
-    /// way, views on or not.
-    pub(crate) fn draw_colliders(&mut self) {
-        if !self.debug_view && !self.sensor_view && self.debugged.is_empty() {
+    /// The physics gizmos that are on (see `PhysicsGizmos`), into the debug
+    /// lines where things are drawn this frame - and every collider with
+    /// its own `ColliderDebug`, its own way, gizmos on or not.
+    pub(crate) fn draw_gizmos(&mut self) {
+        if !self.gizmos.any() && self.debugged.is_empty() {
             return;
         }
-        const COLLIDER_COLOR: [f32; 3] = [1.0, 0.55, 0.1];
+        const MOVING_COLOR: [f32; 3] = [1.0, 0.55, 0.1];
+        const FIXED_COLOR: [f32; 3] = [0.35, 0.45, 0.6];
+        let gizmos = self.gizmos;
         let default_look = ColliderDebug::default().no_faces();
         let mut lines = std::mem::take(&mut self.lines);
         let mut faces = std::mem::take(&mut self.faces);
@@ -516,8 +550,8 @@ impl PhysicsWorld {
                         let (edges, faces) = look.colors(occupied);
                         (edges.map(rgb), faces.map(|color| color.to_rgba_f32()))
                     }
-                    None if collider.is_sensor() && (self.debug_view || self.sensor_view) => (default_look.colors(occupied).0.map(rgb), None),
-                    None if !collider.is_sensor() && self.debug_view && !body.is_fixed() => (Some(COLLIDER_COLOR), None),
+                    None if collider.is_sensor() && gizmos.sensors => (default_look.colors(occupied).0.map(rgb), None),
+                    None if !collider.is_sensor() && gizmos.colliders => (Some(if body.is_fixed() { FIXED_COLOR } else { MOVING_COLOR }), None),
                     None => continue,
                 };
                 let pose = *pose.get_or_insert_with(|| self.render_pose(handle, body));
@@ -535,6 +569,10 @@ impl PhysicsWorld {
                     (None, _) => {}
                 }
             }
+            if gizmos.rigidbodies && body.is_dynamic() {
+                let pose = pose.unwrap_or_else(|| self.render_pose(handle, body));
+                draw_body(&mut lines, &pose, body, &self.colliders);
+            }
         }
         self.lines = lines;
         self.faces = faces;
@@ -549,6 +587,31 @@ impl PhysicsWorld {
 fn rgb(color: crate::ui::color::UiColor) -> [f32; 3] {
     let [r, g, b, _] = color.to_rgba_f32();
     [r, g, b]
+}
+
+/// A dynamic body's gizmo at `pose`: its center of mass as three axes
+/// along its principal axes of inertia (red, green, blue - all gray while
+/// it's asleep), sized to its colliders, and its velocity - a yellow line
+/// as far as it'll go in a second.
+fn draw_body(lines: &mut Lines, pose: &Isometry3<f32>, body: &RigidBody, colliders: &ColliderSet) {
+    let mass = &body.mass_properties().local_mprops;
+    let center = pose * mass.local_com;
+    let reach = body.colliders().iter()
+        .filter_map(|handle| colliders.get(*handle))
+        .map(|collider| collider.shape().compute_local_bounding_sphere().radius())
+        .fold(0.0, f32::max);
+    let size = (reach * 0.4).clamp(0.1, 3.0);
+    let axes = pose.rotation * mass.principal_inertia_local_frame;
+    const GRAY: [f32; 3] = [0.55, 0.55, 0.55];
+    for (axis, color) in [(Vector3::x(), [1.0, 0.2, 0.2]), (Vector3::y(), [0.2, 1.0, 0.2]), (Vector3::z(), [0.3, 0.5, 1.0])] {
+        let color = if body.is_sleeping() { GRAY } else { color };
+        let arm = axes * axis * size;
+        lines.line(center.coords - arm * 0.25, center.coords + arm, color);
+    }
+    let velocity = *body.linvel();
+    if velocity.norm() > 1e-3 {
+        lines.line(center.coords, center.coords + velocity, [1.0, 0.9, 0.2]);
+    }
 }
 
 /// `shape` at `pose` as triangles into `faces` - the shapes `draw_shape`
@@ -765,6 +828,43 @@ mod tests {
     }
 
     #[test]
+    fn each_gizmo_draws_its_own_things() {
+        let mut world = PhysicsWorld::new();
+        let ground = def("ground", Vector3::zeros(), None, Colliders::new().add(ColliderBuilder::cuboid(10.0, 0.1, 10.0)), &[]);
+        world.start(vec![ground, ball("rock", 0.0, &[]), zone(&[])]);
+        let drawn = |world: &mut PhysicsWorld, gizmos: PhysicsGizmos| {
+            world.steps_due(0.0, gizmos);
+            world.draw_gizmos();
+            let count = world.lines().segments().len();
+            world.lines.clear();
+            count
+        };
+        assert_eq!(drawn(&mut world, PhysicsGizmos::default()), 0);
+        // The ground's 12 edges (fixed ones too) and the ball's 3 circles.
+        let colliders = drawn(&mut world, PhysicsGizmos { colliders: true, ..Default::default() });
+        assert_eq!(colliders, 12 + 3 * 24);
+        // Just the zone's box.
+        assert_eq!(drawn(&mut world, PhysicsGizmos { sensors: true, ..Default::default() }), 12);
+        // The ball's center of mass, 3 axes - not moving yet, so no velocity.
+        assert_eq!(drawn(&mut world, PhysicsGizmos { rigidbodies: true, ..Default::default() }), 3);
+        assert_eq!(drawn(&mut world, PhysicsGizmos::all()), 12 + 3 * 24 + 12 + 3);
+        // The game's own lines go with the bodies' gizmo.
+        world.steps_due(0.0, PhysicsGizmos { colliders: true, sensors: true, rigidbodies: false });
+        assert!(world.debug_lines().is_none());
+        world.steps_due(0.0, PhysicsGizmos { rigidbodies: true, ..Default::default() });
+        assert!(world.debug_lines().is_some());
+    }
+
+    #[test]
+    fn toggling_all_gizmos_turns_them_off_if_any_is_on() {
+        let mut gizmos = PhysicsGizmos { sensors: true, ..Default::default() };
+        gizmos.toggle_all();
+        assert_eq!(gizmos, PhysicsGizmos::default());
+        gizmos.toggle_all();
+        assert_eq!(gizmos, PhysicsGizmos::all());
+    }
+
+    #[test]
     fn a_collider_with_an_outline_draws_it_where_the_collider_is() {
         let mut world = PhysicsWorld::new();
         let mut colliders = Colliders::new().add(ColliderBuilder::cuboid(1.0, 1.0, 1.0)).debug(crate::physics::ColliderDebug::new()).into_entries();
@@ -773,8 +873,8 @@ mod tests {
         let mut def = def("traced", Vector3::new(5.0, 0.0, 0.0), None, Colliders::new(), &[]);
         def.colliders = colliders;
         world.start(vec![def]);
-        world.steps_due(0.0, false, false);
-        world.draw_colliders();
+        world.steps_due(0.0, PhysicsGizmos::default());
+        world.draw_gizmos();
         // Its one line, moved with its body - not the box's 12 edges.
         let segments = world.lines().segments();
         assert_eq!(segments.len(), 1);
@@ -789,14 +889,14 @@ mod tests {
             def("zone", Vector3::zeros(), None, sensor, &[]),
             ball("rock", 10.0, &[]),
         ]);
-        world.steps_due(0.0, false, false);
-        world.draw_colliders();
+        world.steps_due(0.0, PhysicsGizmos::default());
+        world.draw_gizmos();
         assert!(!world.lines().is_empty() && !world.faces().is_empty());
         // Only the debugged one: the rock's edges aren't there.
         let segments = world.lines().segments().len();
         world.remove_body("zone");
-        world.steps_due(0.0, false, false);
-        world.draw_colliders();
+        world.steps_due(0.0, PhysicsGizmos::default());
+        world.draw_gizmos();
         assert!(world.lines().is_empty() && world.faces().is_empty() && segments > 0);
     }
 

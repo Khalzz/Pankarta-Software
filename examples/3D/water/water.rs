@@ -63,7 +63,7 @@ struct Buoyancy {
     /// How much a cell under water is slowed, per second.
     drag: f32,
     /// Where each cell under water was pushed last step, and how hard - for
-    /// the physics debug view.
+    /// the bodies' physics gizmo (`app.physics.debug_lines`).
     pushes: Vec<(Vector3<f32>, Vector3<f32>)>,
 }
 

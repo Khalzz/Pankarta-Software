@@ -1,7 +1,7 @@
 //! The engine's debug views - `app.renderer.debug`, each off by default:
 //!
-//!     app.renderer.debug.physics = true;   // collider shapes, and what physics behaviors draw
-//!     app.renderer.debug.sensors = true;   // just the sensors' areas - green with something inside
+//!     app.renderer.debug.physics.colliders = true;   // physics gizmos, each its own - see PhysicsGizmos
+//!     app.renderer.debug.physics.toggle_all();       // all of them on, or off
 //!     app.renderer.debug.wireframe = true; // every model's edges
 //!     app.renderer.debug.depth = true;     // the depth buffer, near dark to far light
 //!     app.renderer.debug.shadows = true;   // the sun's shadow maps, nearest first, bottom left
@@ -12,6 +12,8 @@ use std::collections::{HashMap, HashSet};
 
 use wgpu::util::DeviceExt;
 
+use crate::physics::PhysicsGizmos;
+
 use crate::rendering::instance_management::{InstanceRaw, ModelDataInstance};
 use crate::rendering::models::model::Mesh;
 use crate::rendering::models::textures::Texture;
@@ -19,10 +21,8 @@ use crate::rendering::models::textures::Texture;
 /// Which debug views are on - see the module doc.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DebugViews {
-    pub physics: bool,
-    /// Every sensor collider's area (Rapier's `sensor`) - cyan while it's empty, green
-    /// while something overlaps it. Also part of `physics`.
-    pub sensors: bool,
+    /// The physics gizmos: colliders, sensors, bodies' centers of mass.
+    pub physics: PhysicsGizmos,
     pub wireframe: bool,
     pub depth: bool,
     pub shadows: bool,

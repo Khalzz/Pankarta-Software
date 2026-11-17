@@ -49,7 +49,7 @@ pub mod prelude {
     pub use crate::asset_manager::{AssetManager, CollisionMesh, Meshes};
     pub use crate::input::input::{user_dir, Input};
     pub use crate::input::source::{Axis, Button, InputSource, Key, MouseButton};
-    pub use crate::physics::{Collider, ColliderDebug, Colliders, Layers, ModelShape};
+    pub use crate::physics::{Collider, ColliderDebug, Colliders, Layers, ModelShape, PhysicsGizmos};
     /// What bodies and colliders are made of - Rapier's own (see docs/colliders.md).
     pub use rapier3d::prelude::{CoefficientCombineRule, ColliderBuilder, MassProperties, RigidBodyBuilder};
     pub use crate::scene_manager::behavior::Behavior;
@@ -101,7 +101,7 @@ pub mod physics {
     pub use body::{Collider, ColliderDebug, Colliders, Layers};
     pub use physics_resources::compute_principal_inertia;
     pub use model_shape::ModelShape;
-    pub use world::{PhysicsWorld, RayHit, SensorChange, SensorEvent};
+    pub use world::{PhysicsGizmos, PhysicsWorld, RayHit, SensorChange, SensorEvent};
 }
 
 /// The frame's timing - `app.time`.

@@ -164,7 +164,7 @@ Node::new("zone")
     .with_property(Colliders::new()
         .add(ColliderBuilder::cylinder(1.0, 2.0).sensor(true))
             .detects(["player"])            // only nodes with Layers::new(["player"])
-            .debug(ColliderDebug::new()))   // drawn, with no debug view on
+            .debug(ColliderDebug::new()))   // drawn, with no gizmos on
     .with_behavior(Zone)
 
 // A pickup radius around a player: one more collider on its body.
@@ -351,4 +351,14 @@ It gives a `ColliderBuilder` like any other, so Rapier settings chain on: `.add(
 
 - **Your node's `Layers`** set each collider's collision groups, unless you gave the builder groups of your own (`.collision_groups(..)`).
 - **Rapier's API changes between versions.** Code using its builders may need small changes when the engine moves to a newer Rapier.
-- **Debug drawing** draws Rapier's exact shapes as what they are: a ball as three circles, a cylinder as its two end circles and side lines, a capsule as its circles and sides, a cone as its base circle and lines to its tip. Convex hulls (`from_model`, `from_mesh`, `hemisphere`) and triangle meshes show their real edges, and compounds each of their parts. A collider made from a `Mesh::profile_shape` is drawn by **its rings instead**: each ring and the lines along its length, traced onto the collider's real surface. Where the collider is the mesh, they sit exactly on your rings. Where a convex hull fills a dent, they're drawn out on the hull, so you can see that the dent doesn't collide.
+- **Debug drawing:** `app.renderer.debug.physics` is a set of gizmos, each on its own (see `PhysicsGizmos`):
+
+  ```rust
+  app.renderer.debug.physics.colliders = true;   // every collider: moving ones orange, fixed ones dim blue-gray
+  app.renderer.debug.physics.sensors = true;     // sensor areas: cyan, green while something's inside
+  app.renderer.debug.physics.rigidbodies = true; // each dynamic body's center of mass and velocity
+  app.renderer.debug.physics.toggle_all();       // all on, or all off if any is on (walking: F5)
+  ```
+
+  The center of mass is drawn as three axes along the body's principal axes of inertia, gray while the body is asleep; the yellow line is how far it'll go in a second. What a game draws into `app.physics.debug_lines()` (forces, pushes) shows with `rigidbodies`. A collider with `.debug(..)` is drawn whatever's on.
+- **Shapes in debug drawing:** the engine draws Rapier's exact shapes as what they are: a ball as three circles, a cylinder as its two end circles and side lines, a capsule as its circles and sides, a cone as its base circle and lines to its tip. Convex hulls (`from_model`, `from_mesh`, `hemisphere`) and triangle meshes show their real edges, and compounds each of their parts. A collider made from a `Mesh::profile_shape` is drawn by **its rings instead**: each ring and the lines along its length, traced onto the collider's real surface. Where the collider is the mesh, they sit exactly on your rings. Where a convex hull fills a dent, they're drawn out on the hull, so you can see that the dent doesn't collide.

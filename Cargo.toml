@@ -32,6 +32,10 @@ nalgebra = "0.33"
 serde = { version = "1.0", features = ["derive"] }
 ron = "0.10"
 
+# SVG icons for the gizmos (see rendering::gizmos) - only the drawing, no
+# text or raster images inside the SVGs.
+resvg = { version = "0.50", default-features = false }
+
 # The game's debug windows (see DebugUi)
 egui = "0.32"
 egui-wgpu = "0.32"
@@ -85,6 +89,10 @@ path = "examples/3D/particles.rs"
 [[example]]
 name = "text_and_lines"
 path = "examples/3D/text_and_lines.rs"
+
+[[example]]
+name = "gizmos"
+path = "examples/3D/gizmos.rs"
 
 [[example]]
 name = "meshes_and_models"

@@ -129,6 +129,9 @@ impl SceneManager {
         app.ui.has_changed = true;
         app.physics.stop();
         app.origin.reset();
+        // The old scene's gizmos still up (a duration left) - its places mean
+        // nothing in the new one.
+        app.gizmos.clear();
         app.renderer.render_sets = load.frame.render_sets;
         app.renderer.frame_plan = load.frame.plan;
         app.scene_manager.active = name;

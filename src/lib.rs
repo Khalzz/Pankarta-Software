@@ -58,6 +58,7 @@ pub mod prelude {
         degrees_from_rotation, rotation_from_degrees, CameraLens, Light, LightKind, Line, LinePoint, LineSpace, LookAt, Material, Mesh, MeshShape, Model, ModelMesh, OriginAnchor, Shape2D, ShapeKind, Text, TextureSpace, Transform2D, Transform3D, UiLayer,
     };
     pub use crate::rendering::enviroment::environment::Environment;
+    pub use crate::rendering::gizmos::{GizmoColor, Icon};
     pub use crate::rendering::render_pipeline::shadow_renderer::Shadows;
     pub use crate::asset_manager::DoubleSidedMeshes;
     pub use crate::scene_manager::scene::{FrameContext, Scene, SceneBehaviour};
@@ -187,6 +188,16 @@ pub mod rendering {
     pub mod debug_views;
     pub mod egui_overlay;
     pub mod frame;
+    /// Lines, icons and text drawn over the world for debugging -
+    /// `app.gizmos` (see `gizmos::Gizmos`).
+    pub mod gizmos {
+        pub mod gizmos;
+        pub mod icons;
+        pub(crate) mod renderer;
+
+        pub use gizmos::{GizmoColor, GizmoDrawer, GizmoPoint, GizmoStyle, Gizmos, IconGizmo, LineGizmo, Pose, TextGizmo};
+        pub use icons::{Icon, IconLibrary};
+    }
     pub mod graphics_backend;
     pub mod instance_management;
     pub mod lines;

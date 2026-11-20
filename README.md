@@ -537,5 +537,6 @@ In-depth docs, in [docs/](docs/):
 - [meshes_and_models.md](docs/meshes_and_models.md): `Mesh`, `Model`, parts and materials
 - [colliders.md](docs/colliders.md): bodies and colliders (Rapier's builders), mass, kinematic bodies, shapes from a model's meshes, `Meshes`, `.each()`, hiding collision meshes, sensors
 - [shapes_and_lines.md](docs/shapes_and_lines.md): `Line`, `Shape2D`, 2D `Text`
+- [gizmos.md](docs/gizmos.md): debug lines, icons and text drawn from any behavior (`app.gizmos`), channels, your own SVG icons
 - [sign_glass.md](docs/sign_glass.md): a custom shader drawing a sign seen only through a glass
 - [animation_tracks.md](docs/animation_tracks.md): animation

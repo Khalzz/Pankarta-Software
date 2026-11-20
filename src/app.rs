@@ -14,6 +14,7 @@ use crate::particles::Emitter;
 use crate::particles::renderer::{EmitterSource, ParticleFrameInfo, ParticleRenderer};
 use crate::physics::PhysicsWorld;
 use crate::rendering::egui_overlay::DebugUi;
+use crate::rendering::gizmos::Gizmos;
 use crate::rendering::graphics_backend::GraphicsBackend;
 use crate::rendering::enviroment::environment::PreparedEnvironment;
 use crate::rendering::instance_management::{InstanceRaw, ShadowRun};
@@ -66,6 +67,8 @@ pub struct Size {
       every scene runs with (see PhysicsWorld).
     - particles: every node's particles and trails, and the wind and sea
       they move in (see ParticleRenderer).
+    - gizmos: lines, icons and text drawn over the world for debugging, in
+      channels switched on and off together (see Gizmos).
     - origin: the floating origin - where the open scene's (0, 0, 0) is in
       the world, moved along to keep positions precise far out (see
       WorldOrigin).
@@ -89,6 +92,7 @@ pub struct App {
     pub physics: PhysicsWorld,
     pub input: Input,
     pub particles: ParticleRenderer,
+    pub gizmos: Gizmos,
     pub origin: WorldOrigin,
     pub should_quit: bool,
     event_pump: Option<EventPump>,
@@ -135,6 +139,7 @@ impl App {
             physics: PhysicsWorld::new(),
             input,
             particles,
+            gizmos: Gizmos::new(),
             origin: WorldOrigin::new(),
             should_quit: false,
             event_pump: Some(event_pump),
@@ -332,6 +337,7 @@ impl App {
         crate::ui::widgets::toast::update_toasts(&mut self.ui, self.time.unscaled_delta_time, ui_height);
         self.prepare_ui_content();
         self.prepare_node_visuals();
+        self.prepare_gizmos();
         self.apply_cursor();
         self.fire_ui_click_handlers();
 
@@ -836,7 +842,11 @@ impl App {
                 self.run_debug_ui();
             }
 
-            match self.render() {
+            let rendered = self.render();
+            // This frame's gizmos are drawn (or the frame couldn't be) - the
+            // ones without time left come down.
+            self.gizmos.end_frame(self.time.delta_time);
+            match rendered {
                 Ok(_) => {},
                 Err(wgpu::SurfaceError::Outdated) => {
                     self.resize()
@@ -899,6 +909,7 @@ impl App {
         scene.shift_origin(shift);
         self.physics.shift_origin(shift);
         self.particles.shift_origin(shift);
+        self.gizmos.shift_origin(shift);
         self.renderer.render_sets.shift_origin(&self.renderer.device, shift);
         self.origin.record_shift(shift);
         scene.run_origin_shift(self, shift);

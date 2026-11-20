@@ -93,6 +93,8 @@ pub struct Renderer {
   pub(crate) line_renderer: LineRenderer,
   pub(crate) face_renderer: crate::rendering::lines::FaceRenderer,
   pub(crate) wireframe: WireframeRenderer,
+  /// Draws `app.gizmos` (see rendering::gizmos).
+  pub(crate) gizmo_renderer: crate::rendering::gizmos::renderer::GizmoRenderer,
   /// What's drawn behind everything - see `set_environment`.
   environment: Environment,
   /// See `set_ambient_light`.
@@ -246,6 +248,7 @@ impl Renderer {
     let line_renderer = LineRenderer::new(&device, config.format, &light.rendering_data.bind_group_layout, &camera_resources.bind_group_layout);
     let face_renderer = crate::rendering::lines::FaceRenderer::new(&device, config.format, &light.rendering_data.bind_group_layout, &camera_resources.bind_group_layout);
     let wireframe = WireframeRenderer::new(&device, config.format, &camera_resources.bind_group_layout);
+    let gizmo_renderer = crate::rendering::gizmos::renderer::GizmoRenderer::new(&device, config.format, &camera_resources.bind_group_layout);
     let shapes_2d = crate::rendering::shapes_2d::Shapes2D::new(&device, config.format);
 
 
@@ -282,6 +285,7 @@ impl Renderer {
       line_renderer,
       face_renderer,
       wireframe,
+      gizmo_renderer,
       ambient_light: [0.25, 0.25, 0.3],
       ambient_ground: 0.45,
       prepared_from: environment.clone(),

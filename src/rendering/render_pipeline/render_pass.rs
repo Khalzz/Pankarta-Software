@@ -11,6 +11,7 @@ use crate::rendering::frame::{FramePlan, FrameStep};
 use crate::rendering::instance_management::ModelDataInstance;
 use crate::rendering::render_pipeline::shadow_renderer::Cascade;
 use crate::rendering::render_sets::RenderSets;
+use crate::rendering::gizmos::renderer::GIZMO_TEXT;
 use crate::rendering::node_visuals::{NODE_LINES, NODE_TEXT};
 use crate::rendering::shader_library::{Blend, Cull, Kind, Overlay, PipelineKey, Placement, BLIT, SDF_TEXT, STANDARD, THICK_LINES};
 use crate::scene_manager::node::properties::Material;
@@ -356,6 +357,11 @@ impl App {
             self.renderer.shaders.set_instance(NODE_TEXT, SDF_TEXT, &Default::default());
             overlays.push((NODE_TEXT.to_owned(), Kind::Text));
         }
+        // The gizmos' text, once there's been any.
+        if self.renderer.gizmo_renderer.uses_text() {
+            self.renderer.shaders.set_instance(GIZMO_TEXT, SDF_TEXT, &Default::default());
+            overlays.push((GIZMO_TEXT.to_owned(), Kind::Text));
+        }
         materials.extend(overlays.iter().map(|(key, _)| key.clone()));
         materials.extend(["engine/ui_error", "engine/sdf_text_error", "engine/thick_lines_error"].map(str::to_owned));
         self.renderer.shaders.retain_instances(&materials);
@@ -692,6 +698,10 @@ impl App {
     // and HUD - is copied and blurred first, so that layer's blur shows the
     // HUD behind it instead of painting the bare world over it.
     fn render_ui_pass(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, which: UiPass, frame: Option<&wgpu::Texture>) {
+        // The gizmos, under the UI - at the first UI step only (see
+        // rendering::gizmos::renderer). `frame` is there when `view` is the
+        // screen, whose depth can hide them.
+        self.render_gizmos(encoder, view, frame.is_some());
         // The debug lines and faces are drawn here too - with no UI, still.
         let debug_drawing = !self.renderer.lines.is_empty() || !self.physics.lines().is_empty() || !self.physics.faces().is_empty();
         if self.ui.ui_rendering.num_indices == 0 && self.ui.image_draws.is_empty() && !debug_drawing {

@@ -488,7 +488,7 @@ pub(crate) fn srgb_to_linear(channel: f32) -> f32 {
 /// The signed distance field of a glyph's coverage (`width` x `height`, 0..255),
 /// with `pad` empty texels round it: 0.5 (128) on the edge, rising inside
 /// and falling outside by 0.5 over `spread` texels.
-fn signed_distance_field(coverage: &[u8], width: usize, height: usize, pad: usize, spread: f32) -> Vec<u8> {
+pub(crate) fn signed_distance_field(coverage: &[u8], width: usize, height: usize, pad: usize, spread: f32) -> Vec<u8> {
     let (field_width, field_height) = (width + pad * 2, height + pad * 2);
     let alpha = |x: usize, y: usize| -> f32 {
         if x < pad || y < pad || x >= pad + width || y >= pad + height {

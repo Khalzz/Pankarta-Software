@@ -103,7 +103,7 @@ impl OrthographicScene {
         }
         for view in views() {
             nodes.push(Node::new(view.name)
-                .with_property(Transform3D { position: view.position, rotation: UnitQuaternion::face_towards(&view.looking, &view.up), ..Default::default() })
+                .with_property(Transform3D { position: view.position, rotation: UnitQuaternion::face_towards(&-view.looking, &view.up), ..Default::default() })
                 .with_property(view.lens));
         }
         for node in nodes {

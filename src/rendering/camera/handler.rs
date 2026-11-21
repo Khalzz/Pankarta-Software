@@ -413,7 +413,8 @@ impl SceneCameras {
     }
 
     /// Puts camera `name` (registering it first if it's new) where a camera
-    /// node is: at `position`, looking along `rotation`'s +Z with its +Y up,
+    /// node is: at `position`, looking along `rotation`'s -Z with its +Y up
+    /// and +X to its right (Godot's convention - see `Transform3D::forward`),
     /// with `lens` - drawn its viewport big, or the whole screen. See
     /// `Scene::sync_cameras`.
     pub(crate) fn place(&mut self, name: &str, position: Vector3<f32>, rotation: UnitQuaternion<f32>, lens: &CameraLens) {
@@ -423,7 +424,7 @@ impl SceneCameras {
         let (width, height) = lens.viewport.unwrap_or((self.width, self.height));
         let Some(instance) = self.cameras.get_mut(name) else { return };
         instance.camera.set_position(Point3::from(position));
-        instance.camera.set_orientation(rotation * Vector3::z(), rotation * Vector3::y());
+        instance.camera.set_orientation(rotation * -Vector3::z(), rotation * Vector3::y());
         instance.projection.fovy = lens.fovy;
         instance.projection.orthographic = lens.orthographic;
         instance.projection.znear = lens.znear;

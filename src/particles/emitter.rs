@@ -1,7 +1,7 @@
 use super::effect::{ParticleEffect, TrailEffect};
 
 /// A node property: one instance of an effect, emitted from wherever the
-/// node is - its `Transform3D` places and turns it, and its forward (+Z) is
+/// node is - its `Transform3D` places and turns it, and its +Z is
 /// where `Motion::direction` / emission shapes are measured from. More than
 /// one emitter on something means more nodes - children of it, each with
 /// its own:

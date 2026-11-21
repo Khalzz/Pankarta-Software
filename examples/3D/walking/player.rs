@@ -60,7 +60,8 @@ impl Player {
         Player {
             camera: Camera {
                 pitch: 0.0,
-                yaw: 0.0,
+                // Turned around from -Z, to face the course (laid out along +Z).
+                yaw: std::f32::consts::PI,
                 target_fov: None,
                 zoom_smoothing: 0.08,
             },
@@ -115,7 +116,8 @@ impl Behavior for Player {
         if app.window.is_cursor_locked() {
             let look = app.input.mouse_look() * RADIANS_PER_COUNT;
             self.camera.yaw -= look.x;
-            self.camera.pitch = (self.camera.pitch + look.y).clamp(-1.5, 1.5);
+            // Looking along -Z: looking down is a negative turn about X.
+            self.camera.pitch = (self.camera.pitch - look.y).clamp(-1.5, 1.5);
         }
 
         let heading = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), self.camera.yaw);
@@ -174,8 +176,8 @@ impl Behavior for Player {
         };
 
         let heading = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), self.camera.yaw);
-        let forward = heading * Vector3::z();
-        let right = forward.cross(&Vector3::y());
+        let forward = heading * -Vector3::z();
+        let right = heading * Vector3::x();
 
         if let Some(body) = app.physics.body_mut(&node.id) {
             body.reset_forces(false);

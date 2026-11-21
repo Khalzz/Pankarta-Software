@@ -7,7 +7,7 @@
 ///         .with_property(Light::directional([1.0, 0.95, 0.9]))
 ///
 /// Only directional lights for now: the scene is lit by its first one (the
-/// sun), shining along its node's +Z - the way a camera looks. A scene
+/// sun), shining along its node's -Z - the way a camera looks. A scene
 /// without one has no sunlight, and its procedural sky no sun disc.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Light {

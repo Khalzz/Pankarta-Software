@@ -135,16 +135,19 @@ impl Behavior for CockpitCamera {
   fn update(&mut self, node: &mut Node, scene: &mut pankarta_software::scene_manager::scene_access::SceneAccess, app: &mut App) {
     let active = scene.cameras().active_name() == COCKPIT_CAMERA;
     if active {
-      // Looking along +Z: turning right is a negative turn about Y, looking
-      // down a positive one about X. A head turns only so far.
+      // Looking along -Z: turning right is a negative turn about Y, looking
+      // down a negative one about X. A head turns only so far.
       self.yaw = (self.yaw - app.input.mouse_rel_x() as f32 * self.sensitivity).clamp(-2.6, 2.6);
-      self.pitch = (self.pitch + app.input.mouse_rel_y() as f32 * self.sensitivity).clamp(-1.3, 1.4);
+      self.pitch = (self.pitch - app.input.mouse_rel_y() as f32 * self.sensitivity).clamp(-1.4, 1.3);
     }
 
     // Kept in the seat even while not looked through, so switching to it
     // doesn't show a frame from wherever it was.
     let Some(plane) = scene.get_node(&self.plane).and_then(|plane| plane.get_property::<Transform3D>()).copied() else { return };
-    let head = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), self.yaw) * UnitQuaternion::from_axis_angle(&Vector3::x_axis(), self.pitch);
+    // The jet's nose is its +Z (glTF's front) and a camera looks along its
+    // -Z: a half turn about Y points the eye out of the canopy.
+    let model_front = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), std::f32::consts::PI);
+    let head = model_front * UnitQuaternion::from_axis_angle(&Vector3::y_axis(), self.yaw) * UnitQuaternion::from_axis_angle(&Vector3::x_axis(), self.pitch);
     if let Some(transform) = node.get_property_mut::<Transform3D>() {
       transform.position = plane.position + plane.rotation * self.eye;
       transform.rotation = plane.rotation * head;

@@ -114,17 +114,17 @@ impl Behavior for FreeCamera {
             } else {
                 look
             };
-            // The camera looks along +Z: turning toward its right is a
-            // negative turn about Y, looking down a positive one about X.
+            // The camera looks along -Z: turning toward its right is a
+            // negative turn about Y, looking down a negative one about X.
             self.yaw -= self.smoothed_look.x;
-            self.pitch = (self.pitch + self.smoothed_look.y).clamp(-1.5, 1.5);
+            self.pitch = (self.pitch - self.smoothed_look.y).clamp(-1.5, 1.5);
         } else {
             self.smoothed_look = Vector2::zeros();
         }
         let rotation = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), self.yaw) * UnitQuaternion::from_axis_angle(&Vector3::x_axis(), self.pitch);
 
-        let forward = rotation * Vector3::z();
-        let right = forward.cross(&Vector3::y()).normalize();
+        let forward = rotation * -Vector3::z();
+        let right = rotation * Vector3::x();
         let walk = app.input.get_vector("left", "right", "forward", "back").normalize();
         let climb = app.input.get_axis("down", "up");
         let speed = if app.input.is_pressed("fast") { self.speed * 4.0 } else { self.speed };
@@ -157,7 +157,7 @@ impl FreeCameraScene {
                 .material(Material::standard().texture(GROUND_TEXTURE).tiled(4.0, TextureSpace::World)));
 
         let camera = Node::new("camera")
-            .with_property(Transform3D { position: Vector3::new(0.0, 2.0, -10.0), ..Default::default() })
+            .with_property(Transform3D { position: Vector3::new(0.0, 2.0, 10.0), ..Default::default() })
             .with_property(CameraLens::new(70.0))
             .with_behavior(FreeCamera { yaw: 0.0, pitch: 0.0, speed: 6.0, smoothing: 0.0, smoothed_look: Vector2::zeros(), target_fov: None, zoom_smoothing: 0.08, diagnostic: std::env::var("MOUSE_DIAG").is_ok().then(MouseDiagnostic::default) });
 

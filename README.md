@@ -128,6 +128,17 @@ App                         the engine: window, renderer, physics, input, audio,
 
 The rule of thumb: **properties are *what* a node is, behaviours are *what it does*.**
 
+### Axes
+
+The same as Godot's: **right-handed, +Y up, -Z forward, +X right.** A camera that isn't turned sees +X on its right, +Y up, and +Z coming toward it - so a bigger Z is closer to the camera, like a z index.
+
+- A camera looks along its node's -Z, `LookAt` turns a node's -Z toward its target, and a directional `Light` shines along its -Z. `Transform3D::facing(direction)` turns -Z along `direction`.
+- `transform.forward()` (-Z), `back()` (+Z), `right()` (+X) and `up()` (+Y) give a node's own directions in the world: `position += transform.forward() * speed * dt`.
+- A turn about +Y by a positive angle turns *left*, and about +X by a positive angle looks *up*.
+- **Models face +Z** (glTF's front, and Blender's when it exports) - like in Godot. A camera or `LookAt` on a model looks out of its back unless it's turned half around Y. To point a model's nose somewhere, use `Transform3D::model_facing(direction)` (or `scene_nodes::model_facing`) - `facing`'s twin for +Z.
+
+Moving code written for the old +Z-forward cameras: [docs/axes_migration.md](docs/axes_migration.md).
+
 ---
 
 ## The app
@@ -260,7 +271,7 @@ if let Some(transform) = node.get_property_mut::<Transform3D>() {
 | `Colliders` | Its colliders: `Colliders::new().add(ColliderBuilder::..)`, shapes from a model's meshes with `Collider::from_model`, trigger zones with `.sensor(true)` and `.detects([..])`. Without a body: static, or following the node if all are sensors |
 | `CameraLens` | Makes the node a camera (field of view, near plane). A scene without one gets a default camera. |
 | `LookAt` | Turns the node to face another node every frame |
-| `Light` | The sun: `Light::directional(color)`, shining along the node's +Z |
+| `Light` | The sun: `Light::directional(color)`, shining along the node's -Z (its forward) |
 | `Shape2D` | A rectangle, square or circle on a 2D node |
 | `Text` | Text on a node, in 3D or 2D |
 | `Line` | A line in 3D or 2D, `Line::new(start, end)`, with points local to the node or in the world |
@@ -449,7 +460,8 @@ let ship = Node::new("ship")
         .with_property(Transform3D { position: Vector3::new(0.0, 0.0, -3.0), ..Default::default() })   // relative to the ship
         .with_property(Mesh::sphere(0.3).material(Material::standard().color(UiColor::Hex("#FF8800")))))
     .with_child(Node::new("chase_camera")
-        .with_property(Transform3D { position: Vector3::new(0.0, 3.0, -12.0), ..Default::default() })
+        // A camera looks along its -Z: turned to look along +Z, where the ship's nose is.
+        .with_property(Transform3D { position: Vector3::new(0.0, 3.0, -12.0), ..Transform3D::facing(Vector3::z()) })
         .with_property(CameraLens::new(70.0))
         .follow_position_only());   // follows the ship but doesn't turn with it
 ```

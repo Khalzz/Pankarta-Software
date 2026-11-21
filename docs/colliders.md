@@ -47,11 +47,14 @@ Node::new("player")
             .friction(0.0)
             .friction_combine_rule(CoefficientCombineRule::Min)))
 
-// The ground, a wall: colliders and no body - they stay put.
+// The ground, a wall: colliders and no body - they stay put. The ground is
+// a thick slab with its top at y 0 (see the note below).
 Node::new("ground")
     .with_property(Transform3D::default())
-    .with_property(Colliders::new().add(ColliderBuilder::halfspace(Vector3::y_axis())))
+    .with_property(Colliders::new().add(ColliderBuilder::cuboid(100.0, 1.0, 100.0).translation(-Vector3::y())))
 ```
+
+> **Use a slab for the ground, not `ColliderBuilder::halfspace`.** A convex hull (`ModelShape::ConvexHull`, profile shapes, anything from a model) on Rapier's halfspace never settles: it rocks, sinks partly into the ground, tips over and wanders off. The same hulls rest still on a cuboid.
 
 | Body | Moved by | |
 |---|---|---|

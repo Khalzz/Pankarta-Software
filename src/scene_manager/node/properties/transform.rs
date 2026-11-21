@@ -33,12 +33,43 @@ impl Transform3D {
         Matrix4::new_translation(&self.position) * self.rotation.to_homogeneous() * Matrix4::new_nonuniform_scaling(&self.scale)
     }
 
-    /// At the origin, turned so its +Z points along `direction` (+Y as close
-    /// to up as it can) - for a node whose facing is what matters: a
-    /// directional `Light`, a camera. No direction: not turned.
+    /// At the origin, turned so its -Z (forward) points along `direction`
+    /// (+Y as close to up as it can) - for a node whose facing is what
+    /// matters: a directional `Light`, a camera. No direction: not turned.
     pub fn facing(direction: Vector3<f32>) -> Self {
         let rotation = crate::scene_manager::scene_nodes::facing(direction).unwrap_or_else(UnitQuaternion::identity);
         Self { rotation, ..Default::default() }
+    }
+
+    /// At the origin, turned so its +Z - a model's front (glTF's) - points
+    /// along `direction`: `facing` for a model rather than a camera or a
+    /// light. No direction: not turned.
+    pub fn model_facing(direction: Vector3<f32>) -> Self {
+        let rotation = crate::scene_manager::scene_nodes::model_facing(direction).unwrap_or_else(UnitQuaternion::identity);
+        Self { rotation, ..Default::default() }
+    }
+
+    /// Which way it faces: its -Z. The engine's axes are Godot's -
+    /// right-handed, +Y up, -Z forward, +X right - so a camera, `LookAt` and
+    /// a directional `Light` all look (or shine) along this, and a camera
+    /// that isn't turned sees +X on its right and +Z coming toward it.
+    pub fn forward(&self) -> Vector3<f32> {
+        self.rotation * -Vector3::z()
+    }
+
+    /// The other way from `forward`: its +Z.
+    pub fn back(&self) -> Vector3<f32> {
+        self.rotation * Vector3::z()
+    }
+
+    /// Its right: its +X.
+    pub fn right(&self) -> Vector3<f32> {
+        self.rotation * Vector3::x()
+    }
+
+    /// Its up: its +Y.
+    pub fn up(&self) -> Vector3<f32> {
+        self.rotation * Vector3::y()
     }
 
     /// Where a child sitting at `local` from this transform (its parent) is
@@ -164,6 +195,19 @@ mod tests {
 
     fn parent() -> Transform3D {
         Transform3D { position: Vector3::new(100.0, 50.0, -20.0), rotation: UnitQuaternion::from_euler_angles(0.2, 1.1, -0.4), scale: Vector3::new(3.0, 3.0, 3.0) }
+    }
+
+    #[test]
+    fn facing_points_forward_along_the_direction_with_x_on_the_right() {
+        let transform = Transform3D::facing(Vector3::new(0.0, 0.0, 5.0));
+        assert!((transform.forward() - Vector3::z()).magnitude() < 1e-5);
+        assert!((transform.right() + Vector3::x()).magnitude() < 1e-5);
+        assert!((transform.up() - Vector3::y()).magnitude() < 1e-5);
+        // Not turned: looking along -Z, +X on the right - Godot's.
+        let still = Transform3D::default();
+        assert_eq!((still.forward(), still.right()), (-Vector3::z(), Vector3::x()));
+        // A model's front is its back: +Z along the direction.
+        assert!((Transform3D::model_facing(Vector3::new(0.0, 0.0, 5.0)).back() - Vector3::z()).magnitude() < 1e-5);
     }
 
     #[test]

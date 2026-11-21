@@ -196,7 +196,9 @@ impl SceneBehaviour for WaterScene {
         let seabed = Node::new("seabed")
             .with_property(Transform3D { position: Vector3::new(0.0, SEABED, 0.0), ..Default::default() })
             .with_property(Mesh::plane(0).transform(Transform3D { scale: Vector3::new(SEA_SIZE, 1.0, SEA_SIZE), ..Default::default() }))
-            .with_property(Colliders::new().add(ColliderBuilder::halfspace(Vector3::y_axis())));
+            // A slab with its top at the node, not a halfspace - convex hulls
+            // sink into and slide on Rapier's halfspace (see docs/colliders.md).
+            .with_property(Colliders::new().add(ColliderBuilder::cuboid(SEA_SIZE / 2.0, 1.0, SEA_SIZE / 2.0).translation(-Vector3::y())));
 
         let focus = Node::new("focus").with_property(Transform3D::default());
         let camera = Node::new("camera")

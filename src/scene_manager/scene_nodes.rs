@@ -280,11 +280,22 @@ pub fn child_id(parent: &str, name: &str) -> String {
     format!("{parent}/{name}")
 }
 
-/// The rotation that points +Z along `direction` with +Y as near up as it
-/// gets - `None` for no direction at all.
+/// The rotation that points -Z (forward) along `direction` with +Y as near
+/// up as it gets - `None` for no direction at all.
 pub fn facing(direction: Vector3<f32>) -> Option<UnitQuaternion<f32>> {
     let direction = direction.try_normalize(1e-6)?;
     // Straight up or down: any heading will do, Z is as good as any.
+    let up = if direction.y.abs() > 0.999 { Vector3::z() } else { Vector3::y() };
+    // face_towards turns +Z along what it's given: turned the other way,
+    // -Z (forward) points along `direction` and +X ends up on its right.
+    Some(UnitQuaternion::face_towards(&-direction, &up))
+}
+
+/// The rotation that points a model's front - its +Z, glTF's - along
+/// `direction` with +Y as near up as it gets: `facing` for a model (a jet,
+/// a missile) rather than a camera or a light. Godot's `use_model_front`.
+pub fn model_facing(direction: Vector3<f32>) -> Option<UnitQuaternion<f32>> {
+    let direction = direction.try_normalize(1e-6)?;
     let up = if direction.y.abs() > 0.999 { Vector3::z() } else { Vector3::y() };
     Some(UnitQuaternion::face_towards(&direction, &up))
 }

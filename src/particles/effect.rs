@@ -146,13 +146,13 @@ pub struct Burst {
 }
 
 /// Where around the emitter they appear, in the emitter's own frame
-/// (+Z = its forward).
+/// (measured from its +Z - its `Transform3D::back`, not `forward`).
 #[derive(Clone, Copy, Debug)]
 pub enum EmissionShape {
     Point,
     /// Anywhere inside.
     Sphere { radius: f32 },
-    /// Flat, facing the emitter's forward.
+    /// Flat, facing the emitter's +Z.
     Disk { radius: f32 },
     Box { half_extents: Vector3<f32> },
     /// Along the emitter's X, centered - e.g. a whole wing's trailing edge.
@@ -162,7 +162,7 @@ pub enum EmissionShape {
 /// Their initial movement.
 #[derive(Clone, Copy, Debug)]
 pub struct Motion {
-    /// Direction, in the emitter's frame (default: its forward, +Z).
+    /// Direction, in the emitter's frame (default: its +Z).
     pub direction: Vector3<f32>,
     /// Random spread around it (degrees; 0 = a laser, 180 = every way).
     pub cone_angle: f32,

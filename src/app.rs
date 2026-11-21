@@ -194,14 +194,14 @@ impl App {
 
     /// The active scene's sun: toward it (normalized), the light it gives,
     /// and whether it casts shadows - from its first node with a directional
-    /// `Light` and a `Transform3D`, which shines along the node's +Z. None:
+    /// `Light` and a `Transform3D`, which shines along the node's -Z. None:
     /// no sun.
     fn sun(&self) -> Option<(Vector3<f32>, [f32; 3], bool)> {
         let content = self.scene_manager.content()?;
         content.nodes.iter().find_map(|node| {
             let light = node.get_property::<Light>().filter(|light| light.kind == LightKind::Directional)?;
             let transform = node.transform_3d()?;
-            let toward = -(transform.rotation * Vector3::z());
+            let toward = transform.rotation * Vector3::z();
             Some((toward, light.radiance(), light.shadows))
         })
     }

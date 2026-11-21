@@ -1,8 +1,9 @@
 /// Makes a node a camera - registered with the scene's cameras under the
 /// node's id when it spawns, and kept where the node is every frame (see
-/// `Scene::sync_cameras`). A camera looks along its node's +Z, its +Y up
-/// (the same way a model faces) - so a camera child of a plane with no
-/// rotation looks where the plane's nose points.
+/// `Scene::sync_cameras`). A camera looks along its node's -Z (its
+/// `Transform3D::forward`), +Y up and +X to its right - Godot's way. A model
+/// faces its +Z (glTF's front), so a camera child of a plane looks where the
+/// nose points only turned half around Y (`Transform3D::facing(Vector3::z())`).
 ///
 /// Perspective by default (`CameraLens::new`): things shrink with distance.
 /// `CameraLens::orthographic` has no perspective - a thing is the same size

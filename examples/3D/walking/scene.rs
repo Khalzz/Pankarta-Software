@@ -81,7 +81,10 @@ impl WalkingScene {
                             .tiled(4.0, TextureSpace::World),
                     ),
             )
-            .with_property(Colliders::new().add(ColliderBuilder::halfspace(Vector3::y_axis())));
+            // A thick slab with its top at y 0, not a halfspace: convex
+            // hulls (the profile shapes) never settle on Rapier's halfspace -
+            // they rock, sink in and wander off (see docs/colliders.md).
+            .with_property(Colliders::new().add(ColliderBuilder::cuboid(100.0, 1.0, 100.0).translation(-Vector3::y())));
 
         // A big static jet to walk on: its exact surface, every mesh of the
         // file merged into one triangle mesh - fine for a body that never
@@ -391,8 +394,8 @@ impl SceneBehaviour for WalkingScene {
             width: 2.0,
         });
 
-        // Facing the camera, which looks along its +Z with +Y up - so its
-        // right is -X.
+        // Facing the camera, which looks along its -Z with +Y up - so its
+        // right is +X.
         let name = app.renderer.render_sets.text(PLANE_NAME);
         name.clear();
         name.push(
@@ -400,7 +403,7 @@ impl SceneBehaviour for WalkingScene {
             Font::default(),
             TextFrame::world(
                 plane.position + Vector3::y() * PLANE_NAME_HEIGHT,
-                camera.rotation * -Vector3::x(),
+                camera.rotation * Vector3::x(),
                 camera.rotation * Vector3::y(),
                 1.0,
             ),

@@ -247,6 +247,7 @@ impl App {
         } else {
             self.renderer.light.uniform.shadow_params[0] = 0.0;
         }
+        self.renderer.light.uniform.shadow_debug[0] = if self.renderer.debug.shadow_cascades { 1.0 } else { 0.0 };
         self.renderer.light.uniform.ambient = self.renderer.ambient_light();
         self.renderer.light.uniform.ambient_ground = self.renderer.ambient_ground();
         self.renderer.light.uniform.time = self.time.shader_time();

@@ -14,8 +14,8 @@ use crate::rendering::{camera::handler::CameraResources, models::{model::{self, 
 // extra padding before it either; _padding2 keeps ambient on the next one,
 // and ambient_ground (a scalar, packed right after it) brings shadow_view_proj to 64, the next 16-byte boundary a
 // mat4x4 aligns to - shadow_view_proj(64..320, 4 of them),
-// shadow_params(320..336), shadow_texels(336..352), 352 a multiple of 16 as
-// the struct's size has to be.
+// shadow_params(320..336), shadow_texels(336..352), shadow_debug(352..368),
+// 368 a multiple of 16 as the struct's size has to be.
 // Getting this wrong doesn't error - the shader just silently reads whatever
 // raw bytes land at the offset it expects instead of the real value - burned
 // once already (see git history), so any new field added here needs the
@@ -58,6 +58,9 @@ pub struct LightUniform {
     pub shadow_params: [f32; 4],
     // How big a texel of each cascade's map is in the world.
     pub shadow_texels: [f32; MAX_CASCADES],
+    // (x) 1: tint every pixel by the cascade it reads its shadow from
+    // (DebugViews::shadow_cascades); the rest unused.
+    pub shadow_debug: [f32; 4],
 }
 
 pub struct LightRenderData {
@@ -104,6 +107,7 @@ impl Light {
             shadow_view_proj: [[[0.0; 4]; 4]; MAX_CASCADES],
             shadow_params: [0.0; 4],
             shadow_texels: [0.0; MAX_CASCADES],
+            shadow_debug: [0.0; 4],
         };
 
         let buffer = device.create_buffer_init(

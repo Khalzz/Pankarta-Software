@@ -5,6 +5,7 @@
 //!     app.renderer.debug.wireframe = true; // every model's edges
 //!     app.renderer.debug.depth = true;     // the depth buffer, near dark to far light
 //!     app.renderer.debug.shadows = true;   // the sun's shadow maps, nearest first, bottom left
+//!     app.renderer.debug.shadow_cascades = true; // tints what each map shades: red, green, blue, yellow - nearest first
 //!
 //! A view that's off costs nothing.
 
@@ -26,6 +27,10 @@ pub struct DebugViews {
     pub wireframe: bool,
     pub depth: bool,
     pub shadows: bool,
+    /// Every pixel that gets shadows tinted by the map (cascade) it reads
+    /// them from - red the nearest, then green, blue, yellow; blended where
+    /// one hands over to the next, untinted past the last.
+    pub shadow_cascades: bool,
 }
 
 /// One mesh's edges, ready to draw - its model's own buffers, read by the

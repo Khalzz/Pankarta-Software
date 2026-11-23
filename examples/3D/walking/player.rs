@@ -1,4 +1,4 @@
-use nalgebra::{UnitQuaternion, Vector3};
+use nalgebra::{UnitQuaternion, Vector2, Vector3};
 use pankarta_software::physics::PhysicsWorld;
 use pankarta_software::prelude::*;
 use pankarta_software::rapier3d::prelude::SharedShape;
@@ -16,6 +16,11 @@ const CROUCH_HALF_HEIGHT: f32 = 0.55;
 const CROUCH_EYE_HEIGHT: f32 = EYE_HEIGHT - 2.0 * (PLAYER_HALF_HEIGHT - CROUCH_HALF_HEIGHT);
 
 const PLAYER_MASS: f32 = 80.0;
+
+/// Free camera (F toggles): how fast it flies (m/s) - slow, to get right up
+/// to things - and how many times faster with "run" held.
+const FREE_SPEED: f32 = 2.0;
+const FREE_RUN_FACTOR: f32 = 8.0;
 
 struct Camera {
     pitch: f32,
@@ -43,6 +48,9 @@ pub struct Player {
     camera: Camera,
     movement: Movement,
     crouch: Crouch,
+    /// Where the free camera is, while it's on (F) - the body stays where it
+    /// was left, and the controls fly the camera instead.
+    free: Option<Vector3<f32>>,
 }
 
 /// Crouching (held "crouch"): a shorter capsule, a lower eye, slower.
@@ -77,6 +85,7 @@ impl Player {
                 air_acceleration: 3.0,
             },
             crouch: Crouch { crouched: false, eye_height: EYE_HEIGHT, smoothing: 0.08 },
+            free: None,
         }
     }
 }
@@ -131,15 +140,34 @@ impl Behavior for Player {
         let Some(camera) = scene.get_node_mut("camera") else {
             return;
         };
+        let rotation = heading * UnitQuaternion::from_axis_angle(&Vector3::x_axis(), self.camera.pitch);
+
+        // F: free camera on (from where the eye is now) or off (back to the body).
+        if app.input.is_just_pressed(InputSource::key(Key::F)) {
+            self.free = match self.free {
+                Some(_) => None,
+                None => camera.get_property::<Transform3D>().map(|transform| transform.position),
+            };
+        }
+        if let Some(free) = &mut self.free {
+            // Flies where it looks; jump up, crouch down (world up/down);
+            // run faster. Unscaled time: it flies the same in slow motion.
+            let input = app.input.get_vector("left", "right", "forward", "back");
+            let vertical = app.input.get_axis("crouch", "jump");
+            let direction = rotation * Vector3::new(input.x, 0.0, input.y) + Vector3::y() * vertical;
+            if direction.norm_squared() > 1e-6 {
+                let speed = if app.input.is_pressed("run") { FREE_SPEED * FREE_RUN_FACTOR } else { FREE_SPEED };
+                *free += direction.normalize() * speed * app.time.unscaled_delta_time;
+            }
+        }
         // The eye eases down when it crouches and back up when it stands -
         // the same at any frame rate.
         let eye_target = if self.crouch.crouched { CROUCH_EYE_HEIGHT } else { EYE_HEIGHT };
         let ease = 1.0 - (-app.time.delta_time / self.crouch.smoothing.max(0.0001)).exp();
         self.crouch.eye_height += (eye_target - self.crouch.eye_height) * ease;
         if let Some(transform) = camera.get_property_mut::<Transform3D>() {
-            transform.position = position + Vector3::y() * self.crouch.eye_height;
-            transform.rotation =
-                heading * UnitQuaternion::from_axis_angle(&Vector3::x_axis(), self.camera.pitch);
+            transform.position = self.free.unwrap_or(position + Vector3::y() * self.crouch.eye_height);
+            transform.rotation = rotation;
         }
 
         if let Some(lens) = camera.get_property_mut::<CameraLens>() {
@@ -153,15 +181,18 @@ impl Behavior for Player {
     }
 
     fn fixed_update(&mut self, node: &mut Node, _scene: &mut SceneAccess, app: &mut App) {
-        let walk = app
-            .input
-            .get_vector("left", "right", "forward", "back")
-            .normalize();
+        // With the free camera on, the controls fly it - the body just stops.
+        let free = self.free.is_some();
+        let walk: Vector2<f32> = if free {
+            Vector2::zeros()
+        } else {
+            app.input.get_vector("left", "right", "forward", "back").normalize().into()
+        };
         let grounded = self::on_ground(&app.physics, &node.id);
 
         // Crouches while "crouch" is held - and stays down after it's let go
         // until there's room over its head to stand.
-        let crouched = app.input.is_pressed("crouch") || (self.crouch.crouched && !room_to_stand(&app.physics, &node.id));
+        let crouched = (!free && app.input.is_pressed("crouch")) || (self.crouch.crouched && !room_to_stand(&app.physics, &node.id));
         if crouched != self.crouch.crouched {
             self.crouch.crouched = crouched;
             set_crouched(&mut app.physics, &node.id, crouched);
@@ -169,7 +200,7 @@ impl Behavior for Player {
 
         let speed = if crouched {
             self.movement.crouch_speed
-        } else if app.input.is_pressed("run") {
+        } else if !free && app.input.is_pressed("run") {
             self.movement.run_speed
         } else {
             self.movement.walk_speed
@@ -203,7 +234,7 @@ impl Behavior for Player {
             // velocity.z = movement.z;
 
             // Jump logic
-            if app.input.is_just_pressed("jump") && grounded && !crouched {
+            if !free && app.input.is_just_pressed("jump") && grounded && !crouched {
                 velocity.y = self.movement.jump_speed;
             }
 

@@ -48,12 +48,17 @@ pub struct Shadows {
     /// Each map's size, in texels each way - bigger, sharper (and more
     /// memory: 2048 is 32 MB a map - the one read, and the still casters').
     pub resolution: u32,
-    /// How soft their edges are, in texels of the map - 0 for hard.
+    /// How far either way their edges fade, in texels of the map - a smooth
+    /// fade with no noise, from one of a few filters: under 0.5 hard (the
+    /// texels' steps show), up to 1.5 about 1.5 texels, up to 2.5 about 2.4,
+    /// past that about 3 (the most).
     pub softness: f32,
-    /// The least a shadow's edge fades over, in meters, however fine the
-    /// maps' texels - so close-up shadows (sharp maps) blend in smoothly
-    /// instead of ending in a hard line. The wider of this and `softness`
-    /// texels wins. 0: `softness` alone.
+    /// The least a shadow's edge fades over either way, in meters, however
+    /// fine the maps' texels - so close-up shadows (sharp maps) blend in
+    /// smoothly instead of ending in a hard line. The wider of this and
+    /// `softness` texels wins. Where it's more than 3 of a map's texels, the
+    /// next, coarser map is read there instead (just as smooth, no slower).
+    /// 0: `softness` alone.
     pub blur: f32,
     /// Whether shadows fall on see-through meshes (glTF alpha mode Blend -
     /// glass, flames), drawn in the "transparent" pass. They never cast any;
@@ -64,8 +69,9 @@ pub struct Shadows {
 impl Default for Shadows {
     fn default() -> Self {
         // 4 maps over 40 m: the nearest ~1.5 m each way around the camera at
-        // ~2 mm a texel, edges fading over at least 1.5 cm - sharp up close,
-        // smooth edges; nothing past 40 m from the camera casts.
+        // ~2 mm a texel, edges fading over at least 1.5 cm (read from the
+        // second map, ~5 mm a texel, where the nearest's are too fine for
+        // that) - smooth edges; nothing past 40 m from the camera casts.
         Self { enabled: true, distance: 40.0, cascades: 4, resolution: 2048, softness: 1.0, blur: 0.015, on_transparent: true }
     }
 }

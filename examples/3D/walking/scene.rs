@@ -13,7 +13,19 @@ use crate::player::Player;
 use crate::sensor_gallery::{sensor_gallery, SENSORS};
 use crate::sign::sign_glass;
 
+/// What F8 steps through - how shadow edges are filtered, to compare (see
+/// Shadows): (name, resolution, softness in texels, blur in meters).
+const SHADOW_PRESETS: [(&str, u32, f32, f32); 5] = [
+    ("engine default: 2048, softness 1, blur 1.5 cm", 2048, 1.0, 0.015),
+    ("Skies sandbox: 4096, softness 1.5, no blur", 4096, 1.5, 0.0),
+    ("2048, softness 1.5, no blur", 2048, 1.5, 0.0),
+    ("2048, softness 3 (widest), no blur", 2048, 3.0, 0.0),
+    ("hard: 2048, softness 0, no blur", 2048, 0.0, 0.0),
+];
+
 pub struct WalkingScene {
+    /// Which of SHADOW_PRESETS is in use - F8 cycles them.
+    shadow_preset: usize,
     /// Which of AMBIENT_GROUND_LEVELS is in use - H cycles them.
     ambient_ground: usize,
 }
@@ -35,6 +47,19 @@ fn physics_debug_text(gizmos: PhysicsGizmos) -> String {
         .filter_map(|(on, name)| on.then_some(name))
         .collect();
     format!("F5: physics gizmos ({})", if on.is_empty() { "off".to_owned() } else { on.join(", ") })
+}
+
+fn shadow_debug_text(app: &App) -> String {
+    let on_off = |on: bool| if on { "on" } else { "off" };
+    format!(
+        "F6: shadow cascades tint ({}) - red, green, blue, yellow nearest first   F7: shadows ({})",
+        on_off(app.renderer.debug.shadow_cascades),
+        on_off(app.renderer.shadows().enabled),
+    )
+}
+
+fn shadow_filter_text(preset: usize) -> String {
+    format!("F8: shadow filter ({})", SHADOW_PRESETS[preset].0)
 }
 
 fn ambient_ground_text(level: usize) -> String {
@@ -301,6 +326,24 @@ impl WalkingScene {
                         .set_size(SizeValue::Pixels(500.0), SizeValue::Fit),
                 )
                 .set_child(
+                    "shadow_debug",
+                    text(&shadow_debug_text(app), &TextStyle::default())
+                        .set_padding((10.0, 4.0))
+                        .set_size(SizeValue::Pixels(900.0), SizeValue::Fit),
+                )
+                .set_child(
+                    "shadow_filter",
+                    text(&shadow_filter_text(0), &TextStyle::default())
+                        .set_padding((10.0, 4.0))
+                        .set_size(SizeValue::Pixels(900.0), SizeValue::Fit),
+                )
+                .set_child(
+                    "free_camera",
+                    text("F: free camera (WASD, Space up, Ctrl down, Shift fast)", &TextStyle::default())
+                        .set_padding((10.0, 4.0))
+                        .set_size(SizeValue::Pixels(700.0), SizeValue::Fit),
+                )
+                .set_child(
                     "zone",
                     text("", &TextStyle::default())
                         .set_padding((10.0, 4.0))
@@ -326,6 +369,7 @@ impl WalkingScene {
         app.renderer
             .set_ambient_ground(AMBIENT_GROUND_LEVELS[DEFAULT_AMBIENT_GROUND].0);
         Self {
+            shadow_preset: 0,
             ambient_ground: DEFAULT_AMBIENT_GROUND,
         }
     }
@@ -343,6 +387,21 @@ impl SceneBehaviour for WalkingScene {
         if app.input.is_just_pressed(InputSource::key(Key::F5)) {
             app.renderer.debug.physics.toggle_all();
         }
+        // Which shadow map shades each pixel - and shadows off, to tell
+        // what's a shadow from what's just shading.
+        if app.input.is_just_pressed(InputSource::key(Key::F6)) {
+            app.renderer.debug.shadow_cascades = !app.renderer.debug.shadow_cascades;
+        }
+        if app.input.is_just_pressed(InputSource::key(Key::F7)) {
+            let mut shadows = app.renderer.shadows();
+            shadows.enabled = !shadows.enabled;
+            app.renderer.set_shadows(shadows);
+        }
+        if app.input.is_just_pressed(InputSource::key(Key::F8)) {
+            self.shadow_preset = (self.shadow_preset + 1) % SHADOW_PRESETS.len();
+            let (_, resolution, softness, blur) = SHADOW_PRESETS[self.shadow_preset];
+            app.renderer.set_shadows(Shadows { resolution, softness, blur, ..app.renderer.shadows() });
+        }
         if let Some(ui) = scene
             .get_node_mut("hud")
             .and_then(|node| node.get_property_mut::<UiLayer>())
@@ -356,6 +415,12 @@ impl SceneBehaviour for WalkingScene {
             }
             if let Some(label) = ui.label_mut("physics_debug") {
                 label.set_text(physics_debug_text(app.renderer.debug.physics));
+            }
+            if let Some(label) = ui.label_mut("shadow_debug") {
+                label.set_text(shadow_debug_text(app));
+            }
+            if let Some(label) = ui.label_mut("shadow_filter") {
+                label.set_text(shadow_filter_text(self.shadow_preset));
             }
             if let Some(label) = ui.label_mut("zone") {
                 let inside: Vec<&str> = SENSORS

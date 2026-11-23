@@ -69,10 +69,11 @@ pub struct Shadows {
 impl Default for Shadows {
     fn default() -> Self {
         // 4 maps over 40 m: the nearest ~1.5 m each way around the camera at
-        // ~2 mm a texel, edges fading over at least 1.5 cm (read from the
-        // second map, ~5 mm a texel, where the nearest's are too fine for
-        // that) - smooth edges; nothing past 40 m from the camera casts.
-        Self { enabled: true, distance: 40.0, cascades: 4, resolution: 2048, softness: 1.0, blur: 0.015, on_transparent: true }
+        // ~2 mm a texel, edges fading over ~2.4 texels (the 5x5 filter, 9
+        // reads - ~4.4 mm up close): smooth with no steps, still crisp, and
+        // the nearest map's detail kept (a `blur` wider than its texels
+        // would read the coarser second one). Nothing past 40 m casts.
+        Self { enabled: true, distance: 40.0, cascades: 4, resolution: 2048, softness: 2.0, blur: 0.0, on_transparent: true }
     }
 }
 

@@ -15,8 +15,9 @@ use crate::sign::sign_glass;
 
 /// What F8 steps through - how shadow edges are filtered, to compare (see
 /// Shadows): (name, resolution, softness in texels, blur in meters).
-const SHADOW_PRESETS: [(&str, u32, f32, f32); 5] = [
-    ("engine default: 2048, softness 1, blur 1.5 cm", 2048, 1.0, 0.015),
+const SHADOW_PRESETS: [(&str, u32, f32, f32); 6] = [
+    ("engine default: 2048, softness 2, no blur", 2048, 2.0, 0.0),
+    ("old default: 2048, softness 1, blur 1.5 cm", 2048, 1.0, 0.015),
     ("Skies sandbox: 4096, softness 1.5, no blur", 4096, 1.5, 0.0),
     ("2048, softness 1.5, no blur", 2048, 1.5, 0.0),
     ("2048, softness 3 (widest), no blur", 2048, 3.0, 0.0),

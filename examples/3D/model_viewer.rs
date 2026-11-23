@@ -192,7 +192,8 @@ impl Default for ModelViewer {
 
 // A shadow look to compare: how far from the camera shadows go, in how many
 // maps (cascades), each how many texels across, and how wide their edges
-// fade (`blur`, meters - the engine's default is 1.5 cm). Each map is
+// fade (`blur`, meters - the engine's default is none: `softness`'s ~2.4
+// texels alone, ~4.4 mm up close). Each map is
 // CASCADE_GROWTH (3) times the one before, the last `distance` each way - so
 // the nearest's texel is about 2.5 * distance / 3^(cascades - 1) / resolution.
 struct ShadowPreset {
@@ -207,12 +208,13 @@ const SHADOW_PRESETS: [ShadowPreset; 5] = [
     // The engine's old defaults: ~2 cm a texel nearest, shadows out to 150 m.
     ShadowPreset { name: "far: 150 m, ~2 cm texels", distance: 150.0, cascades: 3, resolution: 2048, blur: 0.015 },
     // The engine's defaults: the whole cockpit in the nearest map (~2 mm a
-    // texel), out to 40 m - edges fading over 1.5 cm.
-    ShadowPreset { name: "default, sharp, soft edges: 40 m, 1.5 cm fade", distance: 40.0, cascades: 4, resolution: 2048, blur: 0.015 },
+    // texel), out to 40 m - edges fading over ~2.4 texels (~4.4 mm).
+    ShadowPreset { name: "default, sharp, smooth edges: 40 m, ~4 mm fade", distance: 40.0, cascades: 4, resolution: 2048, blur: 0.0 },
     // The same, fading over 4 cm - like a hazier day.
     ShadowPreset { name: "sharp, softer edges: 40 m, 4 cm fade", distance: 40.0, cascades: 4, resolution: 2048, blur: 0.04 },
-    // The same, edges as hard as the texels make them (~2 mm).
-    ShadowPreset { name: "sharp, hard edges: 40 m, no fade", distance: 40.0, cascades: 4, resolution: 2048, blur: 0.0 },
+    // The same, fading over 1.5 cm (the engine's old default) - read from
+    // the second map (~5 mm texels), the nearest's too fine for that.
+    ShadowPreset { name: "sharp, soft edges: 40 m, 1.5 cm fade", distance: 40.0, cascades: 4, resolution: 2048, blur: 0.015 },
     // Twice the texels each way: ~1 mm nearest out to 40 m - but 4x the
     // memory (about 512 MB for the 4 maps and their cached copies).
     ShadowPreset { name: "4K: 40 m, ~1 mm texels, 1.5 cm fade (512 MB)", distance: 40.0, cascades: 4, resolution: 4096, blur: 0.015 },

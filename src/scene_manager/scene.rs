@@ -4,7 +4,7 @@ use sdl2::EventPump;
 
 use crate::app::{App, AppState};
 use crate::physics::physics_resources::PhysicsObjectDef;
-use crate::rendering::camera::handler::{LookAtTarget, SceneCameras, DEFAULT_CAMERA};
+use crate::rendering::camera::handler::{SceneCameras, DEFAULT_CAMERA};
 use crate::rendering::instance_management::InstanceData;
 use crate::scene_manager::node::properties::{
     CameraLens, Model as NodeModelProperty, Parent, Space, SpawnedLive, Transform2D,
@@ -559,10 +559,6 @@ impl Scene {
 
     pub fn select_camera(&mut self, name: &str) -> bool {
         self.cameras.select_camera(name)
-    }
-
-    pub fn set_camera_look_at(&mut self, name: &str, target: Option<LookAtTarget>) -> bool {
-        self.cameras.set_look_at(name, target)
     }
 
     /// The scene starts: its nodes' `on_spawn`, then its own - each with

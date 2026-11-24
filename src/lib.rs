@@ -209,11 +209,15 @@ pub mod rendering {
     pub mod shapes_2d;
     pub mod thick_lines;
     pub mod vertex;
+    /// What a game reads here: `handler::CameraInstance` (through
+    /// `scene.cameras`), `handler::SceneCameras` and
+    /// `handler::CameraResources::{world_to_screen, screen_ray}`. Cameras
+    /// themselves are made with camera nodes (`CameraLens`).
     pub mod camera {
-        pub mod camera;
+        pub(crate) mod camera;
         pub mod handler;
-        pub mod projection;
-        pub mod uniform;
+        pub(crate) mod projection;
+        pub(crate) mod uniform;
     }
     pub mod enviroment {
         pub mod environment;

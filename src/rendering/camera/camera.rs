@@ -5,18 +5,14 @@ use crate::scene_manager::node::properties::Transform3D;
 #[derive(Copy, Clone, Debug)]
 pub struct Camera {
     pub transform: Transform3D,
-    pub look_at: Option<Point3<f32>>,
     pub up: Vector3<f32>,
-    pub rotation_modifier: UnitQuaternion<f32>,
 }
 
 impl Camera {
     pub fn new(transform: Transform3D) -> Self {
         Self {
             transform,
-            look_at: None,
             up: Vector3::y_axis().into_inner(),
-            rotation_modifier: UnitQuaternion::identity(),
         }
     }
 
@@ -28,37 +24,18 @@ impl Camera {
         self.transform.position = position.coords;
     }
 
-    pub fn yaw(&self) -> f32 {
-        yaw_pitch_from_rotation(self.transform.rotation).0
-    }
-
-    pub fn pitch(&self) -> f32 {
-        yaw_pitch_from_rotation(self.transform.rotation).1
-    }
-
     pub fn set_yaw_pitch(&mut self, yaw: f32, pitch: f32) {
         self.transform.rotation = yaw_pitch_rotation(yaw.to_degrees(), pitch.to_degrees());
     }
 
-    pub fn look_at(&mut self, target: Point3<f32>) {
-        let direction = target - self.position();
-        let normalized_dir = direction.normalize();
-
-        // Calculate pitch and yaw using asin and atan2 for the direction vector.
-        let pitch = normalized_dir.y.asin();
-        let yaw = normalized_dir.z.atan2(normalized_dir.x);
-        self.set_yaw_pitch(yaw, pitch);
-    }
-
     /// Points it along `forward` with `up` as its up - a full orientation,
-    /// roll included (unlike `look_at`, which keeps whatever `up` it had).
+    /// roll included.
     pub fn set_orientation(&mut self, forward: Vector3<f32>, up: Vector3<f32>) {
         let Some(forward) = forward.try_normalize(1e-6) else { return };
         let pitch = forward.y.clamp(-1.0, 1.0).asin();
         let yaw = forward.z.atan2(forward.x);
         self.set_yaw_pitch(yaw, pitch);
         self.up = up;
-        self.rotation_modifier = UnitQuaternion::identity();
     }
 
     pub fn calc_forward_direction(&self) -> Vector3<f32> {
@@ -66,20 +43,9 @@ impl Camera {
     }
 
     pub fn calc_matrix(&self) -> Matrix4<f32> {
-        let direction = self.calc_forward_direction();
-        let modified_direction = self.rotation_modifier * direction;
-        let modified_up = self.rotation_modifier * self.up;
-
         let origin = Point3::origin();
-        Matrix4::look_at_rh(&origin, &(origin + modified_direction), &modified_up)
+        Matrix4::look_at_rh(&origin, &(origin + self.calc_forward_direction()), &self.up)
     }
-}
-
-fn yaw_pitch_from_rotation(rotation: UnitQuaternion<f32>) -> (f32, f32) {
-    let forward = rotation * Vector3::new(1.0, 0.0, 0.0);
-    let yaw = forward.z.atan2(forward.x);
-    let pitch = forward.y.clamp(-1.0, 1.0).asin();
-    (yaw, pitch)
 }
 
 pub fn yaw_pitch_rotation(yaw_deg: f32, pitch_deg: f32) -> UnitQuaternion<f32> {

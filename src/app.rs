@@ -797,13 +797,6 @@ impl App {
                     scene.content.nodes.resolve_hierarchy();
                     scene.sync_render_instances(&mut self);
                     scene.sync_cameras();
-
-                    // Re-aims every look_at-configured camera at its current
-                    // target - last, so it wins over whatever a Behavior/
-                    // scene's own update already did to a camera's
-                    // position/orientation this frame (see SceneCameras::
-                    // update's own doc comment).
-                    scene.cameras.update(&scene.content.renderizable_instances);
                     scene.run_after_cameras(&mut self);
 
                     self.scene_manager.active_scene = Some(scene);
@@ -819,10 +812,7 @@ impl App {
                 self.write_instance_buffers(camera_position);
                 self.update_lighting(camera_position);
 
-                // No-op unless something called SceneCameras::transition_to(...) -
-                // advances the blend (if any) before this frame's view_proj upload.
-                if let Some(cameras) = self.scene_manager.cameras_mut() {
-                    cameras.update_transition(self.time.delta_time);
+                if let Some(cameras) = self.scene_manager.cameras() {
                     self.renderer.camera_resources.update_buffer(&self.renderer.queue, cameras.active());
                 }
                 self.update_particles();

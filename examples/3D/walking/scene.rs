@@ -15,8 +15,9 @@ use crate::sign::sign_glass;
 
 /// What F8 steps through - how shadow edges are filtered, to compare (see
 /// Shadows): (name, resolution, softness in texels, blur in meters).
-const SHADOW_PRESETS: [(&str, u32, f32, f32); 6] = [
-    ("engine default: 2048, softness 2, no blur", 2048, 2.0, 0.0),
+const SHADOW_PRESETS: [(&str, u32, f32, f32); 7] = [
+    ("engine default: 1024, softness 1, no blur", 1024, 1.0, 0.0),
+    ("2048, softness 2, no blur", 2048, 2.0, 0.0),
     ("old default: 2048, softness 1, blur 1.5 cm", 2048, 1.0, 0.015),
     ("Skies sandbox: 4096, softness 1.5, no blur", 4096, 1.5, 0.0),
     ("2048, softness 1.5, no blur", 2048, 1.5, 0.0),
@@ -53,7 +54,7 @@ fn physics_debug_text(gizmos: PhysicsGizmos) -> String {
 fn shadow_debug_text(app: &App) -> String {
     let on_off = |on: bool| if on { "on" } else { "off" };
     format!(
-        "F6: shadow cascades tint ({}) - red, green, blue, yellow nearest first   F7: shadows ({})",
+        "F6: shadow cascades tint ({}) - red, green, blue, yellow... nearest first   F7: shadows ({})",
         on_off(app.renderer.debug.shadow_cascades),
         on_off(app.renderer.shadows().enabled),
     )

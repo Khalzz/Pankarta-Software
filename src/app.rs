@@ -242,7 +242,7 @@ impl App {
             let cascades = self.renderer.shadows.cascades.len() as f32;
             let resolution = self.renderer.shadows.resolution() as f32;
             self.renderer.light.uniform.shadow_view_proj = fit.view_proj;
-            self.renderer.light.uniform.shadow_texels = fit.texel;
+            self.renderer.light.uniform.shadow_cascades = std::array::from_fn(|index| [fit.texel[index], fit.radius[index], 0.0, 0.0]);
             self.renderer.light.uniform.shadow_params = [cascades, 1.0 / resolution, settings.softness, settings.blur.max(0.0)];
         } else {
             self.renderer.light.uniform.shadow_params[0] = 0.0;

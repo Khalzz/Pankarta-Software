@@ -79,6 +79,10 @@ name = "free_camera"
 path = "examples/3D/free_camera.rs"
 
 [[example]]
+name = "shadows"
+path = "examples/3D/shadows.rs"
+
+[[example]]
 name = "walking"
 path = "examples/3D/walking/main.rs"
 

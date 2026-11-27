@@ -492,9 +492,9 @@ impl App {
 
     /// The sun's shadow maps (see render_pipeline::shadow_renderer) - when
     /// it has shadows this frame. For each cascade: its still casters' map
-    /// drawn again if what's in it changed, copied into the map read unless
-    /// that already holds just it, and the moving casters in its box drawn
-    /// over that.
+    /// drawn again if what's in it changed, put back into the map read
+    /// unless that already holds just it, and the moving casters in its box
+    /// drawn over that.
     fn render_shadow_pass(&mut self, encoder: &mut wgpu::CommandEncoder) {
         if !self.renderer.shadows.active {
             return;
@@ -511,7 +511,6 @@ impl App {
         let mut moved = Vec::with_capacity(keys.len());
 
         let shadows = &self.renderer.shadows;
-        let size = shadows.resolution();
         for (index, cascade) in shadows.cascades.iter().enumerate() {
             let key = Some(keys[index]);
             if cascade.still_drawn != key {
@@ -520,14 +519,16 @@ impl App {
             }
             let moving = self.drawn_models().any(|(_, model)| model.shadow_runs.iter().any(|run| !run.still && cascade.sees(run.center, run.radius)));
             // Unless the map read already holds just the still casters' -
-            // nothing moving was drawn over it, and they haven't changed.
+            // nothing moving was drawn over it, and they haven't changed:
+            // a cleared pass, the still map put back, what moves over it.
             if moving || cascade.copied != key {
-                let layer = |texture| wgpu::TexelCopyTextureInfo { texture, mip_level: 0, origin: wgpu::Origin3d { x: 0, y: 0, z: index as u32 }, aspect: wgpu::TextureAspect::All };
-                encoder.copy_texture_to_texture(layer(&shadows.still_map), layer(&shadows.map.texture), wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 });
-            }
-            if moving {
-                let mut render_pass = Self::begin_shadow_pass(encoder, &cascade.view, wgpu::LoadOp::Load);
-                self.draw_shadow_casters(&mut render_pass, cascade, false);
+                let mut render_pass = Self::begin_shadow_pass(encoder, &cascade.view, wgpu::LoadOp::Clear(1.0));
+                render_pass.set_pipeline(&shadows.restore_pipeline);
+                render_pass.set_bind_group(0, &shadows.restore_bind_group, &[]);
+                render_pass.draw(0..3, index as u32..index as u32 + 1);
+                if moving {
+                    self.draw_shadow_casters(&mut render_pass, cascade, false);
+                }
             }
             moved.push(moving);
         }

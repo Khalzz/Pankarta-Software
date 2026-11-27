@@ -134,6 +134,8 @@ impl OrthographicScene {
         // views see much more of the ground at once, so they draw farther.
         let mut shadows = app.renderer.shadows();
         shadows.distance = if view == 0 { Shadows::default().distance } else { 120.0 };
+        // The nearest map grows with it - each 3 times the one before.
+        shadows.near = if view == 0 { Shadows::default().near } else { 120.0 / 27.0 };
         app.renderer.set_shadows(shadows);
     }
 

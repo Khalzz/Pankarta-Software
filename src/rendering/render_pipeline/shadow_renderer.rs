@@ -4,18 +4,24 @@
 //! sun reaches it.
 //!
 //! One map can't be both sharp up close and reach far - so there are a few
-//! (`Shadows::cascades`), each a box around the camera 3 times as big as the
-//! one before, the last `Shadows::distance` each way. All are the same
-//! resolution, so the small near one is sharp and the far ones coarser, where
-//! a texel is smaller on screen anyway. A pixel reads the smallest one it's
-//! in, blending into the next toward its edge.
+//! (`Shadows::cascades`), each read within a sphere around the camera, the
+//! nearest `Shadows::near` across, the last reaching `Shadows::distance`,
+//! each the same number of times bigger than the one before. All
+//! are the same resolution, so the small near one is sharp and the far ones
+//! coarser, where a texel is smaller on screen anyway. A pixel reads the
+//! smallest sphere it's in - by its distance from the camera, so where one
+//! hands over to the next is a circle around the camera, whichever way it
+//! looks and the sun shines - blending into the next toward its edge. Each
+//! map is a box around its sphere, as the sun sees it.
 //!
 //! Casters that held still since the last frame are drawn into a map of their
 //! own per cascade, kept from frame to frame - drawn again only when what's in
 //! it would change: one of them moves, stops or goes, the sun turns, a
-//! material changes, or the box moves. That's copied into the map read (when
-//! it changed, or something moving was drawn over it last frame), and only
-//! what moves is drawn over it. So the boxes don't move with
+//! material changes, or the box moves. That's put back into the map read (when
+//! it changed, or something moving was drawn over it last frame) as the
+//! first draw of a pass that starts cleared (see shadow_restore.wgsl - far
+//! cheaper on a tile-based GPU than copying it and drawing over the copy),
+//! and only what moves is drawn over it. So the boxes don't move with
 //! every step of the camera: each moves in steps of a quarter of its size (and
 //! is that much bigger, so the camera's surroundings are always in it) - and
 //! always by whole texels of its map, or shadow edges would shimmer.
@@ -43,8 +49,18 @@ pub struct Shadows {
     /// out toward it.
     pub distance: f32,
     /// How many shadow maps share that distance (1 to `MAX_CASCADES`) - more,
-    /// sharper up close for the same reach.
+    /// a smaller step in sharpness from one to the next (see `near`).
     pub cascades: u32,
+    /// How far from the camera (world units) the nearest, sharpest map
+    /// reaches. The maps between it and the last (`distance`) are spread
+    /// evenly - each the same number of times bigger than the one before:
+    /// (distance / near) ^ (1 / (cascades - 1)). Where one hands over to
+    /// the next, its texels get that many times bigger; around 3 (the
+    /// default's) that's hard to see - much past 5, the next map's
+    /// shadows show as visibly blurrier just past the circle. So a long
+    /// `distance` with a small `near` (a cockpit's fine shadows, and a
+    /// landscape's out to kilometers) wants more maps.
+    pub near: f32,
     /// Each map's size, in texels each way - bigger, sharper (and more
     /// memory: 2048 is 32 MB a map - the one read, and the still casters').
     pub resolution: u32,
@@ -68,21 +84,21 @@ pub struct Shadows {
 
 impl Default for Shadows {
     fn default() -> Self {
-        // 4 maps over 40 m: the nearest ~1.5 m each way around the camera at
-        // ~2 mm a texel, edges fading over ~2.4 texels (the 5x5 filter, 9
-        // reads - ~4.4 mm up close): smooth with no steps, still crisp, and
-        // the nearest map's detail kept (a `blur` wider than its texels
-        // would read the coarser second one). Nothing past 40 m casts.
-        Self { enabled: true, distance: 40.0, cascades: 4, resolution: 2048, softness: 2.0, blur: 0.0, on_transparent: true }
+        // 4 maps over 40 m: the nearest within ~1.5 m of the camera at
+        // ~3.6 mm a texel, edges fading over ~1.5 texels either way (the
+        // 3x3 filter, 4 reads - ~1 cm up close): smooth, crisp, and cheap.
+        // Measured on the shadows example (M1 Pro, things moving and the
+        // camera flying): about 1.2 ms of GPU a frame, where 2048 texels
+        // and the 5x5 filter took about 4 ms and looked nearly the same -
+        // 1536 texels is the step up in sharpness (~2.2 ms). Each map
+        // 4 MB, 32 MB in all. Nothing past 40 m casts.
+        Self { enabled: true, distance: 40.0, cascades: 4, near: 1.5, resolution: 1024, softness: 1.0, blur: 0.0, on_transparent: true }
     }
 }
 
 /// The most shadow maps there can be - the light's uniform has room for
 /// this many.
-pub const MAX_CASCADES: usize = 4;
-
-/// How much bigger each cascade's box is than the one before.
-const CASCADE_GROWTH: f32 = 3.0;
+pub const MAX_CASCADES: usize = 6;
 
 /// How many steps a cascade's box moves in across its size - see the module
 /// doc.
@@ -166,15 +182,20 @@ pub struct CascadeFit {
     pub view_proj: [[[f32; 4]; 4]; MAX_CASCADES],
     /// Each one's texel, in world units.
     pub texel: [f32; MAX_CASCADES],
+    /// How far from the camera each one is read (world units).
+    pub radius: [f32; MAX_CASCADES],
 }
 
 pub struct ShadowRender {
     /// Every cascade's map, as layers of one texture - the whole of it is
     /// what the light binds (`map.view`, a 2D array).
     pub(crate) map: Texture,
-    /// The still casters' maps, the same way - copied into `map` when it
-    /// doesn't already hold just them (see `Cascade::copied`).
+    /// The still casters' maps, the same way - put back into `map` when it
+    /// doesn't already hold just them (see `Cascade::copied`): the first
+    /// draw of the pass, with `restore_pipeline` and `restore_bind_group`.
     pub(crate) still_map: wgpu::Texture,
+    pub(crate) restore_pipeline: wgpu::RenderPipeline,
+    pub(crate) restore_bind_group: wgpu::BindGroup,
     pub(crate) cascades: Vec<Cascade>,
     /// Each map's texels each way.
     resolution: u32,
@@ -291,12 +312,39 @@ impl ShadowRender {
             cache: None,
         });
 
+        // Writes the still map's depth back - over everything, whatever was
+        // there (the pass starts cleared).
+        let restore_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("shadow_restore"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/environment/shadow_restore.wgsl").into()),
+        });
+        let restore_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("shadow_restore"),
+            layout: Some(&debug_pipeline_layout),
+            vertex: wgpu::VertexState { module: &restore_module, entry_point: Some("vs_main"), buffers: &[], compilation_options: Default::default() },
+            fragment: Some(wgpu::FragmentState { module: &restore_module, entry_point: Some("fs_main"), targets: &[], compilation_options: Default::default() }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: Texture::DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Always,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
         let (resolution, count) = Self::size_of(settings);
         let (map, still_map, cascades) = Self::create_maps(device, camera_layout, resolution, count);
-        let debug_bind_group = Self::create_debug_bind_group(device, &debug_layout, &map);
+        let debug_bind_group = Self::create_debug_bind_group(device, &debug_layout, &map.view);
+        let restore_bind_group = Self::create_debug_bind_group(device, &debug_layout, &Self::array_view(&still_map));
         Self {
             map,
             still_map,
+            restore_pipeline,
+            restore_bind_group,
             cascades,
             resolution,
             camera_layout: camera_layout.clone(),
@@ -331,10 +379,9 @@ impl ShadowRender {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | usage,
             view_formats: &[],
         });
-        let texture = maps("shadow_maps", wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
-        let still_map = maps("still_shadow_maps", wgpu::TextureUsages::COPY_SRC);
-        // An array even with one layer - what the shaders read.
-        let view = texture.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() });
+        let texture = maps("shadow_maps", wgpu::TextureUsages::TEXTURE_BINDING);
+        let still_map = maps("still_shadow_maps", wgpu::TextureUsages::TEXTURE_BINDING);
+        let view = Self::array_view(&texture);
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("shadow_sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -368,11 +415,19 @@ impl ShadowRender {
         (Texture { texture, view, sampler }, still_map, cascades)
     }
 
-    fn create_debug_bind_group(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, map: &Texture) -> wgpu::BindGroup {
+    /// Every layer of `maps`, as the 2D array the shaders read - an array
+    /// even with one layer.
+    fn array_view(maps: &wgpu::Texture) -> wgpu::TextureView {
+        maps.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() })
+    }
+
+    /// Binds `maps` (a 2D array of depth) for the debug view or putting the
+    /// still map back.
+    fn create_debug_bind_group(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, maps: &wgpu::TextureView) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("shadow_debug"),
+            label: Some("shadow_maps_bind_group"),
             layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&map.view) }],
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(maps) }],
         })
     }
 
@@ -391,7 +446,8 @@ impl ShadowRender {
     pub fn resize(&mut self, device: &wgpu::Device, settings: &Shadows) {
         let (resolution, count) = Self::size_of(settings);
         (self.map, self.still_map, self.cascades) = Self::create_maps(device, &self.camera_layout, resolution, count);
-        self.debug_bind_group = Self::create_debug_bind_group(device, &self.debug_layout, &self.map);
+        self.debug_bind_group = Self::create_debug_bind_group(device, &self.debug_layout, &self.map.view);
+        self.restore_bind_group = Self::create_debug_bind_group(device, &self.debug_layout, &Self::array_view(&self.still_map));
         self.resolution = resolution;
     }
 
@@ -409,14 +465,18 @@ impl ShadowRender {
         // The camera in the sun's view - x, y across the map, z along the sun.
         let across = view.transform_vector(&camera_position);
 
-        let mut fit = CascadeFit { view_proj: [[[0.0; 4]; 4]; MAX_CASCADES], texel: [0.0; MAX_CASCADES] };
+        let mut fit = CascadeFit { view_proj: [[[0.0; 4]; 4]; MAX_CASCADES], texel: [0.0; MAX_CASCADES], radius: [0.0; MAX_CASCADES] };
         let last = self.cascades.len() - 1;
         let resolution = self.resolution;
+        let distance = settings.distance.max(0.01);
+        let near = settings.near.clamp(0.01, distance);
+        // How many times bigger each sphere is than the one before.
+        let growth = if last == 0 { 1.0 } else { (distance / near).powf(1.0 / last as f32) };
         for (index, cascade) in self.cascades.iter_mut().enumerate() {
-            // Each box CASCADE_GROWTH times the one before - the last
-            // `distance` each way - and a step bigger, so the camera's
-            // surroundings are in it wherever it is within a step.
-            let reach = settings.distance.max(0.01) / CASCADE_GROWTH.powi((last - index) as i32);
+            // Each sphere `growth` times the one before - the first `near`,
+            // the last `distance` - in a box a step bigger, so the sphere is
+            // in it wherever the camera is within a step.
+            let reach = distance / growth.powi((last - index) as i32);
             let half = reach * (1.0 + 1.0 / CACHE_STEPS);
             let texel = 2.0 * half / resolution as f32;
             // A step is a whole number of texels.
@@ -442,6 +502,7 @@ impl ShadowRender {
             cascade.half = half;
             fit.view_proj[index] = raw;
             fit.texel[index] = texel;
+            fit.radius[index] = reach;
         }
         fit
     }

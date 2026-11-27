@@ -13,9 +13,9 @@ use crate::rendering::{camera::handler::CameraResources, models::{model::{self, 
 // camera_position starts exactly on a 16-byte boundary (32) so it needs no
 // extra padding before it either; _padding2 keeps ambient on the next one,
 // and ambient_ground (a scalar, packed right after it) brings shadow_view_proj to 64, the next 16-byte boundary a
-// mat4x4 aligns to - shadow_view_proj(64..320, 4 of them),
-// shadow_params(320..336), shadow_texels(336..352), shadow_debug(352..368),
-// 368 a multiple of 16 as the struct's size has to be.
+// mat4x4 aligns to - shadow_view_proj(64..448, 6 of them),
+// shadow_params(448..464), shadow_debug(464..480), shadow_cascades(480..576,
+// 6 vec4s), 576 a multiple of 16 as the struct's size has to be.
 // Getting this wrong doesn't error - the shader just silently reads whatever
 // raw bytes land at the offset it expects instead of the real value - burned
 // once already (see git history), so any new field added here needs the
@@ -56,11 +56,14 @@ pub struct LightUniform {
     // map's 0..1 coordinates, how soft the edges are, in texels
     // (Shadows::softness), and nothing.
     pub shadow_params: [f32; 4],
-    // How big a texel of each cascade's map is in the world.
-    pub shadow_texels: [f32; MAX_CASCADES],
     // (x) 1: tint every pixel by the cascade it reads its shadow from
     // (DebugViews::shadow_cascades); the rest unused.
     pub shadow_debug: [f32; 4],
+    // Each cascade's (x) texel, in the world, and (y) how far from the
+    // camera it's read (see ShadowRender::update) - spheres, so they hand
+    // over in circles; (z, w) unused. A vec4 each: a uniform array's every
+    // element takes 16 bytes anyway.
+    pub shadow_cascades: [[f32; 4]; MAX_CASCADES],
 }
 
 pub struct LightRenderData {
@@ -106,8 +109,8 @@ impl Light {
             ambient_ground: 1.0,
             shadow_view_proj: [[[0.0; 4]; 4]; MAX_CASCADES],
             shadow_params: [0.0; 4],
-            shadow_texels: [0.0; MAX_CASCADES],
             shadow_debug: [0.0; 4],
+            shadow_cascades: [[0.0; 4]; MAX_CASCADES],
         };
 
         let buffer = device.create_buffer_init(

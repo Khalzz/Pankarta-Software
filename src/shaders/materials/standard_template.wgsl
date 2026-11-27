@@ -40,13 +40,15 @@ struct Light {
     // Where a camera-relative position falls in each cascade's shadow map;
     // (x) how many cascades there are this frame (0: no shadows), (y) a
     // texel in a map's 0..1 coordinates, (z) how soft the edges are, in
-    // texels, (w) the least they fade over, in meters (Shadows::blur); and
-    // a texel of each cascade's map in the world.
-    shadow_view_proj: array<mat4x4<f32>, 4>,
+    // texels, (w) the least they fade over, in meters (Shadows::blur).
+    shadow_view_proj: array<mat4x4<f32>, 6>,
     shadow_params: vec4<f32>,
-    shadow_texels: vec4<f32>,
     // (x) 1: tint by cascade (DebugViews::shadow_cascades).
     shadow_debug: vec4<f32>,
+    // Each cascade's (x) texel in the world (m), and (y) how far from the
+    // camera (m) it's read - a sphere around it, so where one hands over to
+    // the next is a circle.
+    shadow_cascades: array<vec4<f32>, 6>,
 }
 
 @group(0) @binding(0)
@@ -183,13 +185,21 @@ fn shadow_read(uv: vec2<f32>, offset: vec2<f32>, depth: f32, tilt: vec2<f32>, ma
 // texels is read from a coarser cascade instead (see too_fine).
 const MAX_SPREAD_TEXELS: f32 = 3.0;
 
+// One of shadow_filter's reads: at `texels` (map texels) from `corner`
+// (map units from `uv`).
+fn filter_read(uv: vec2<f32>, corner: vec2<f32>, texels: vec2<f32>, depth: f32, tilt: vec2<f32>, max_tilt: f32, cascade: i32) -> f32 {
+    return shadow_read(uv, corner + texels * light.shadow_params.y, depth, tilt, max_tilt, cascade);
+}
+
 // Cascade `cascade`'s map filtered around `uv` (see shadow_read for the
 // rest): a weighted grid of reads, each already blending its 2x2 texels -
 // a smooth tent-like fade over an edge, the same at every pixel, no noise.
 // `size` is the grid it adds up to in texels: 1 (one read - hard, the
-// texels' steps show), 3, 5 or 7 - fading over about 3, 5 and 6 texels.
-// The weights and offsets are Castano's "optimized PCF" (The Witness),
-// worked out per axis from where `uv` falls in its texel.
+// texels' steps show), 3, 5 or 7 - 4, 9 or 16 reads, fading over about 3,
+// 5 and 6 texels. The weights and offsets are Castano's "optimized PCF"
+// (The Witness), worked out per axis from where `uv` falls in its texel.
+// Written out read by read, with no arrays: a GPU keeps an array indexed
+// by a loop in slow memory, and that cost more than the reads themselves.
 fn shadow_filter(uv: vec2<f32>, depth: f32, tilt: vec2<f32>, max_tilt: f32, cascade: i32, size: i32) -> f32 {
     if (size <= 1) {
         return shadow_read(uv, vec2<f32>(0.0), depth, tilt, max_tilt, cascade);
@@ -199,59 +209,70 @@ fn shadow_filter(uv: vec2<f32>, depth: f32, tilt: vec2<f32>, max_tilt: f32, casc
     let base = floor(p + 0.5);
     let s = p + 0.5 - base;
     // From `uv` to the texel corner the offsets are from (map units).
-    let origin = (base - 0.5) * texel_uv - uv;
-    var weights: array<vec2<f32>, 4>;
-    var offsets: array<vec2<f32>, 4>;
-    var count = 0;
+    let c = (base - 0.5) * texel_uv - uv;
     if (size == 3) {
-        weights[0] = 3.0 - 2.0 * s;
-        weights[1] = 1.0 + 2.0 * s;
-        offsets[0] = (2.0 - s) / weights[0] - 1.0;
-        offsets[1] = s / weights[1] + 1.0;
-        count = 2;
-    } else if (size == 5) {
-        weights[0] = 4.0 - 3.0 * s;
-        weights[1] = vec2<f32>(7.0);
-        weights[2] = 1.0 + 3.0 * s;
-        offsets[0] = (3.0 - 2.0 * s) / weights[0] - 2.0;
-        offsets[1] = (3.0 + s) / weights[1];
-        offsets[2] = s / weights[2] + 2.0;
-        count = 3;
-    } else {
-        weights[0] = 5.0 * s - 6.0;
-        weights[1] = 11.0 * s - 28.0;
-        weights[2] = -(11.0 * s + 17.0);
-        weights[3] = -(5.0 * s + 1.0);
-        offsets[0] = (4.0 * s - 5.0) / weights[0] - 3.0;
-        offsets[1] = (4.0 * s - 16.0) / weights[1] - 1.0;
-        offsets[2] = -(7.0 * s + 5.0) / weights[2] + 1.0;
-        offsets[3] = -s / weights[3] + 3.0;
-        count = 4;
+        let w0 = 3.0 - 2.0 * s;
+        let w1 = 1.0 + 2.0 * s;
+        let o0 = (2.0 - s) / w0 - 1.0;
+        let o1 = s / w1 + 1.0;
+        let row0 = w0.x * filter_read(uv, c, vec2<f32>(o0.x, o0.y), depth, tilt, max_tilt, cascade)
+            + w1.x * filter_read(uv, c, vec2<f32>(o1.x, o0.y), depth, tilt, max_tilt, cascade);
+        let row1 = w0.x * filter_read(uv, c, vec2<f32>(o0.x, o1.y), depth, tilt, max_tilt, cascade)
+            + w1.x * filter_read(uv, c, vec2<f32>(o1.x, o1.y), depth, tilt, max_tilt, cascade);
+        // Each axis's weights add up to 4.
+        return (w0.y * row0 + w1.y * row1) / 16.0;
     }
-    var lit = 0.0;
-    var total = 0.0;
-    for (var j = 0; j < count; j++) {
-        for (var i = 0; i < count; i++) {
-            let weight = weights[i].x * weights[j].y;
-            let offset = origin + vec2<f32>(offsets[i].x, offsets[j].y) * texel_uv;
-            lit += weight * shadow_read(uv, offset, depth, tilt, max_tilt, cascade);
-            total += weight;
+    if (size == 5) {
+        let w0 = 4.0 - 3.0 * s;
+        let w1 = vec2<f32>(7.0);
+        let w2 = 1.0 + 3.0 * s;
+        let o0 = (3.0 - 2.0 * s) / w0 - 2.0;
+        let o1 = (3.0 + s) / w1;
+        let o2 = s / w2 + 2.0;
+        var lit = 0.0;
+        for (var j = 0; j < 3; j++) {
+            let oy = select(select(o2.y, o1.y, j == 1), o0.y, j == 0);
+            let wy = select(select(w2.y, w1.y, j == 1), w0.y, j == 0);
+            let row = w0.x * filter_read(uv, c, vec2<f32>(o0.x, oy), depth, tilt, max_tilt, cascade)
+                + w1.x * filter_read(uv, c, vec2<f32>(o1.x, oy), depth, tilt, max_tilt, cascade)
+                + w2.x * filter_read(uv, c, vec2<f32>(o2.x, oy), depth, tilt, max_tilt, cascade);
+            lit += wy * row;
         }
+        // Each axis's weights add up to 12.
+        return lit / 144.0;
     }
-    return lit / total;
+    let w0 = 5.0 * s - 6.0;
+    let w1 = 11.0 * s - 28.0;
+    let w2 = -(11.0 * s + 17.0);
+    let w3 = -(5.0 * s + 1.0);
+    let o0 = (4.0 * s - 5.0) / w0 - 3.0;
+    let o1 = (4.0 * s - 16.0) / w1 - 1.0;
+    let o2 = -(7.0 * s + 5.0) / w2 + 1.0;
+    let o3 = -s / w3 + 3.0;
+    var lit = 0.0;
+    for (var j = 0; j < 4; j++) {
+        let oy = select(select(select(o3.y, o2.y, j == 2), o1.y, j == 1), o0.y, j == 0);
+        let wy = select(select(select(w3.y, w2.y, j == 2), w1.y, j == 1), w0.y, j == 0);
+        let row = w0.x * filter_read(uv, c, vec2<f32>(o0.x, oy), depth, tilt, max_tilt, cascade)
+            + w1.x * filter_read(uv, c, vec2<f32>(o1.x, oy), depth, tilt, max_tilt, cascade)
+            + w2.x * filter_read(uv, c, vec2<f32>(o2.x, oy), depth, tilt, max_tilt, cascade)
+            + w3.x * filter_read(uv, c, vec2<f32>(o3.x, oy), depth, tilt, max_tilt, cascade);
+        lit += wy * row;
+    }
+    // Each axis's weights add up to -52.
+    return lit / 2704.0;
 }
 
 // How much of the sun reaches `position` (camera-relative) on a surface
 // facing `normal` in cascade `cascade`'s map - 1 lit, 0 shadowed: what the
 // sun sees there is compared with how far the point is from it, at a few
-// texels around (softer edges the farther apart). And how near the map's
-// edge it is (0 at its middle, 1 at its edge) - or -1: not in it.
+// texels around (softer edges the farther apart) - or -1: not in its map.
 // `normal` is the triangle's own (flat) one, not the smoothed normal it's
 // lit with: the depth compared follows the actual surface, and on low-poly
 // geometry a smoothed normal strays from it enough to shade itself.
-fn cascade_shadow(position: vec3<f32>, normal: vec3<f32>, cascade: i32) -> vec2<f32> {
+fn cascade_shadow(position: vec3<f32>, normal: vec3<f32>, cascade: i32) -> f32 {
     let view_proj = light.shadow_view_proj[cascade];
-    let texel_world = light.shadow_texels[cascade];
+    let texel_world = light.shadow_cascades[cascade].x;
     let texel_uv = light.shadow_params.y;
     // How far either way the edge fades, in this map's texels: `softness`,
     // or `blur` meters if that's wider - at most MAX_SPREAD_TEXELS. Which
@@ -286,7 +307,7 @@ fn cascade_shadow(position: vec3<f32>, normal: vec3<f32>, cascade: i32) -> vec2<
     let clip = view_proj * vec4<f32>(lifted, 1.0);
     let uv = shadow_uv(clip);
     if (any(uv < vec2<f32>(margin)) || any(uv > vec2<f32>(1.0 - margin)) || clip.z > 1.0) {
-        return vec2<f32>(1.0, -1.0);
+        return -1.0;
     }
 
     // Two steps along the surface (any two at right angles), and where each
@@ -312,17 +333,9 @@ fn cascade_shadow(position: vec3<f32>, normal: vec3<f32>, cascade: i32) -> vec2<
     // compared deeper than that is taken for shadow. So the point has to be
     // in by more than any read's depth strays from it.
     if (clip.z + max_tilt >= 1.0) {
-        return vec2<f32>(1.0, -1.0);
+        return -1.0;
     }
-
-    let lit = shadow_filter(uv, clip.z, tilt, max_tilt, cascade, size);
-    // Near its far side too, as near its sides: 0.2 of its half-size (in
-    // meters) from it is as far into the fade as 0.2 from a side - or the
-    // next cascade takes over there in one hard line.
-    let half_world = 0.5 * texel_world / texel_uv;
-    let far_room = (1.0 - clip.z) / max(depth_per_meter, 1e-12);
-    let edge = max(max(abs(uv.x - 0.5), abs(uv.y - 0.5)) * 2.0, 1.0 - far_room / half_world);
-    return vec2<f32>(lit, edge);
+    return shadow_filter(uv, clip.z, tilt, max_tilt, cascade, size);
 }
 
 // Whether cascade `cascade`'s texels are too fine for `blur` (more than
@@ -330,63 +343,75 @@ fn cascade_shadow(position: vec3<f32>, normal: vec3<f32>, cascade: i32) -> vec2<
 // it instead: as smooth, with no more reads (detail finer than the blur is
 // smeared out anyway).
 fn too_fine(cascade: i32, cascades: i32) -> bool {
-    return cascade + 1 < cascades && light.shadow_params.w > MAX_SPREAD_TEXELS * light.shadow_texels[cascade];
+    return cascade + 1 < cascades && light.shadow_params.w > MAX_SPREAD_TEXELS * light.shadow_cascades[cascade].x;
+}
+
+// Where, out of a cascade's radius, it starts handing over to the next one
+// (or, the last, fading out) - the band both are read in.
+const HANDOVER: f32 = 0.85;
+
+// The first cascade read at `distance` from the camera: the smallest whose
+// sphere it's in (and fine enough for `blur` - see too_fine) - `cascades`
+// past the last.
+fn first_cascade(distance: f32, cascades: i32) -> i32 {
+    var cascade = 0;
+    while (cascade < cascades && (distance >= light.shadow_cascades[cascade].y || too_fine(cascade, cascades))) {
+        cascade++;
+    }
+    return cascade;
 }
 
 // How much of the sun reaches `position` (camera-relative) on a surface
-// facing `normal` - 1 lit, 0 shadowed - from the smallest (sharpest) cascade
-// it's in (and fine enough for `blur` - see too_fine), blended into the next one toward its edge so where one hands
-// over isn't a line; faded out toward the edge of the last one. Outside
-// every one, lit.
+// facing `normal` - 1 lit, 0 shadowed. Cascades are spheres around the
+// camera, the nearest the sharpest: a pixel reads the one its distance
+// falls in - one map, so one filter - and, toward that sphere's edge, the
+// next one too, blended so where one hands over is a soft circle, not a
+// line. The last one fades into full sun at its edge (`Shadows::distance`).
 // `normal`: the triangle's own (flat) normal - see cascade_shadow.
 fn sun_shadow(position: vec3<f32>, normal: vec3<f32>) -> f32 {
     let cascades = i32(light.shadow_params.x);
-    for (var cascade = 0; cascade < cascades; cascade++) {
-        if (too_fine(cascade, cascades)) {
-            continue;
-        }
+    let distance = length(position);
+    for (var cascade = first_cascade(distance, cascades); cascade < cascades; cascade++) {
         let here = cascade_shadow(position, normal, cascade);
-        if (here.y < 0.0) {
+        // Not in its map after all (far along the sun): the next one.
+        if (here < 0.0) {
             continue;
         }
-        let blend = smoothstep(0.8, 1.0, here.y);
+        let blend = smoothstep(HANDOVER, 1.0, distance / light.shadow_cascades[cascade].y);
         if (blend == 0.0) {
-            return here.x;
+            return here;
         }
         // The next one out - or, after the last, full sun.
         var next = 1.0;
         if (cascade + 1 < cascades) {
             let out = cascade_shadow(position, normal, cascade + 1);
-            next = select(out.x, 1.0, out.y < 0.0);
+            next = select(out, 1.0, out < 0.0);
         }
-        return mix(here.x, next, blend);
+        return mix(here, next, blend);
     }
     return 1.0;
 }
 
 // DebugViews::shadow_cascades: the color of the cascade `position` reads
-// its shadow from (red, green, blue, yellow - nearest first), blended into
+// its shadow from (red, green, blue, yellow, cyan, magenta - nearest
+// first), blended into
 // the next one's where sun_shadow blends them; white past the last.
 fn cascade_tint(position: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
-    var colors = array<vec3<f32>, 4>(
+    var colors = array<vec3<f32>, 6>(
         vec3<f32>(1.0, 0.25, 0.25), vec3<f32>(0.25, 1.0, 0.25), vec3<f32>(0.3, 0.45, 1.0), vec3<f32>(1.0, 0.9, 0.2),
+        vec3<f32>(0.2, 0.95, 1.0), vec3<f32>(1.0, 0.35, 1.0),
     );
     let cascades = i32(light.shadow_params.x);
-    for (var cascade = 0; cascade < cascades; cascade++) {
-        if (too_fine(cascade, cascades)) {
-            continue;
-        }
-        let here = cascade_shadow(position, normal, cascade);
-        if (here.y < 0.0) {
-            continue;
-        }
-        var next = vec3<f32>(1.0);
-        if (cascade + 1 < cascades) {
-            next = colors[cascade + 1];
-        }
-        return mix(colors[cascade], next, smoothstep(0.8, 1.0, here.y));
+    let distance = length(position);
+    let cascade = first_cascade(distance, cascades);
+    if (cascade >= cascades) {
+        return vec3<f32>(1.0);
     }
-    return vec3<f32>(1.0);
+    var next = vec3<f32>(1.0);
+    if (cascade + 1 < cascades) {
+        next = colors[cascade + 1];
+    }
+    return mix(colors[cascade], next, smoothstep(HANDOVER, 1.0, distance / light.shadow_cascades[cascade].y));
 }
 
 //@HOOKS
@@ -522,11 +547,13 @@ fn fs_main(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> @loca
     // Undersides and downward faces - under a dashboard, in a footwell -
     // read darker than tops instead of all the same flat grey.
     let ambient = light.ambient * mix(light.ambient_ground, 1.0, normal.y * 0.5 + 0.5);
-    let lighting = ambient + diffuse_color;
-    var result = lighting * object_color.xyz;
+    var lighting = ambient + diffuse_color;
+    // DebugViews::shadow_cascades - in the light every hook gets, so a
+    // game's shader (engine/tiled too) shows it like engine/standard.
     if (light.shadow_debug.x > 0.5 && in.receives_shadows > 0.5 && light.shadow_params.x > 0.5) {
-        result *= cascade_tint(in.world_position, face_normal);
+        lighting *= cascade_tint(in.world_position, face_normal);
     }
+    let result = lighting * object_color.xyz;
 
     // Long-distance atmospheric haze - same start/end as water.wgsl's fog,
     // fading toward the sky's horizon haze (SkyboxRender::new_procedural's

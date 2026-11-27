@@ -193,9 +193,9 @@ impl Default for ModelViewer {
 // A shadow look to compare: how far from the camera shadows go, in how many
 // maps (cascades), each how many texels across, and how wide their edges
 // fade (`blur`, meters - the engine's default is none: `softness`'s ~2.4
-// texels alone, ~4.4 mm up close). Each map is
-// CASCADE_GROWTH (3) times the one before, the last `distance` each way - so
-// the nearest's texel is about 2.5 * distance / 3^(cascades - 1) / resolution.
+// texels alone, ~4.4 mm up close). Each map is 3 times the one before (see
+// `apply_shadows`), the last `distance` each way - so the nearest's texel is
+// about 2.5 * distance / 3^(cascades - 1) / resolution.
 struct ShadowPreset {
     name: &'static str,
     distance: f32,
@@ -207,9 +207,10 @@ struct ShadowPreset {
 const SHADOW_PRESETS: [ShadowPreset; 5] = [
     // The engine's old defaults: ~2 cm a texel nearest, shadows out to 150 m.
     ShadowPreset { name: "far: 150 m, ~2 cm texels", distance: 150.0, cascades: 3, resolution: 2048, blur: 0.015 },
-    // The engine's defaults: the whole cockpit in the nearest map (~2 mm a
-    // texel), out to 40 m - edges fading over ~2.4 texels (~4.4 mm).
-    ShadowPreset { name: "default, sharp, smooth edges: 40 m, ~4 mm fade", distance: 40.0, cascades: 4, resolution: 2048, blur: 0.0 },
+    // The whole cockpit in the nearest map (~2 mm a texel), out to 40 m -
+    // edges fading over ~2.4 texels (~4.4 mm). Sharper than the engine's
+    // default (1024 texels), at about 3x its cost.
+    ShadowPreset { name: "sharp, smooth edges: 40 m, ~4 mm fade", distance: 40.0, cascades: 4, resolution: 2048, blur: 0.0 },
     // The same, fading over 4 cm - like a hazier day.
     ShadowPreset { name: "sharp, softer edges: 40 m, 4 cm fade", distance: 40.0, cascades: 4, resolution: 2048, blur: 0.04 },
     // The same, fading over 1.5 cm (the engine's old default) - read from
@@ -248,8 +249,12 @@ impl ModelViewer {
         shadows.on_transparent = self.shadows_on_transparent;
         shadows.distance = preset.distance;
         shadows.cascades = preset.cascades;
+        // Each map 3 times the one before (Shadows::near).
+        shadows.near = preset.distance / 3.0_f32.powi(preset.cascades as i32 - 1);
         shadows.resolution = preset.resolution;
         shadows.blur = preset.blur;
+        // What the presets' fades are described with - the 5x5 filter.
+        shadows.softness = 2.0;
         app.renderer.set_shadows(shadows);
         // 0.45 is the engine's default; 1 the old flat ambient.
         app.renderer.set_ambient_ground(if self.sky_ground_ambient { 0.45 } else { 1.0 });

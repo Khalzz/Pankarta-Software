@@ -5,7 +5,7 @@
 //!     app.renderer.debug.wireframe = true; // every model's edges
 //!     app.renderer.debug.depth = true;     // the depth buffer, near dark to far light
 //!     app.renderer.debug.shadows = true;   // the sun's shadow maps, nearest first, bottom left
-//!     app.renderer.debug.shadow_cascades = true; // tints what each map shades: red, green, blue, yellow - nearest first
+//!     app.renderer.debug.shadow_cascades = true; // tints what each map shades: red, green, blue, yellow, cyan, magenta - nearest first
 //!
 //! A view that's off costs nothing.
 

@@ -21,6 +21,9 @@
 //!   point) is in the scene's local numbers too - move it in
 //!   `Behavior::on_origin_shift` / `SceneBehaviour::on_origin_shift`, or keep
 //!   it as a world position (`f64`) and convert it when it's used.
+//! - A shader's positions are the scene's local ones too: a pattern fixed
+//!   in the world (tiles, noise, waves) needs `Material::world_period`, or
+//!   it jumps every time the origin moves.
 //! - To put a node far away (a teleport, a respawn), `app.origin.teleport` -
 //!   the origin moves there first, so the node lands precisely.
 //!
@@ -199,10 +202,13 @@ impl WorldOrigin {
         self.pending.clear();
     }
 
-    /// `origin` modulo `period`, in [0, period) on each axis - worked out in
-    /// `f64`, so it's precise however far out the origin is. What a
-    /// world-tiled texture repeating every `period` meters is offset by.
-    pub(crate) fn wrapped(&self, period: f32) -> Vector3<f32> {
+    /// Where the scene's (0, 0, 0) is in the world, modulo `period`, in
+    /// [0, period) on each axis - worked out in `f64`, so it's precise
+    /// however far out the origin is. What a shader's pattern repeating
+    /// every `period` meters is offset by (`Material::world_period`), and
+    /// what game code working out the same pattern adds to a position:
+    /// `local + wrapped(period)` is where `local` is in the pattern.
+    pub fn wrapped(&self, period: f32) -> Vector3<f32> {
         let period = period.max(1e-4) as f64;
         self.origin.map(|value| value.rem_euclid(period) as f32)
     }
@@ -264,6 +270,25 @@ mod tests {
         let local = origin.to_local(target);
         assert!(local.iter().all(|value| value.abs() <= 512.0));
         assert!((origin.to_world(local) - target).norm() < 1e-4);
+    }
+
+    #[test]
+    fn a_pattern_stays_put_across_a_shift() {
+        // Where a point is in a pattern repeating every `period` - its
+        // local position plus `wrapped` - only changes by whole periods
+        // when the world moves, however far out.
+        let period = 9.0_f32;
+        let mut origin = WorldOrigin::new();
+        origin.start_at(Vector3::new(7_000_000.0, 0.0, -3_000_000.0));
+        let local = Vector3::new(4100.5_f32, 2.0, -12.25);
+        let before = local + origin.wrapped(period);
+        let shift = origin.shift_for(local).unwrap();
+        origin.record_shift(shift);
+        let after = local + shift + origin.wrapped(period);
+        for (a, b) in before.iter().zip(after.iter()) {
+            let cycles = (a - b) / period;
+            assert!((cycles - cycles.round()).abs() < 1e-3, "{a} and {b} aren't the same place in the pattern");
+        }
     }
 
     #[test]

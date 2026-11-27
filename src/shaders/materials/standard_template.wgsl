@@ -129,7 +129,11 @@ struct VertexIn {
 
 // The `fragment` hook's pixel.
 struct FragmentIn {
-    // Where it is: relative to the camera, and in the world.
+    // Where it is: relative to the camera, and in the scene. The scene's
+    // numbers are the floating origin's (see WorldOrigin): they jump by
+    // whole kilometers when it moves, so a pattern fixed in the world
+    // (tiles, noise, waves) adds `params.origin_offset` - see
+    // `Material::world_period`.
     position: vec3<f32>,
     world_position: vec3<f32>,
     // The surface's normal (unit length), facing the side that's seen.

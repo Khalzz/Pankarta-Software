@@ -7,6 +7,12 @@
 //! floating is a game `Behavior` (`Buoyancy`) pushing each crate up where
 //! it's under the waves, every physics step (its `fixed_update`). The waves are defined once, in `WAVES` - the
 //! shader gets them as params, so what's drawn is what things float on.
+//!
+//! The waves are fixed in the world: each repeats every `WORLD_PERIOD`
+//! meters (`waves`), and the sea's material says so
+//! (`Material::world_period`), so the floating origin moving the world
+//! doesn't make the sea jump - the buoyancy adds the same offset
+//! (`app.origin.wrapped`).
 
 use nalgebra::{Point3, Vector3};
 use pankarta_software::app::App;
@@ -26,8 +32,8 @@ use pankarta_software::ui::TextStyle;
 
 // The sea
 
-/// The waves: direction x, direction z, wavelength (m), height (m). The
-/// shader's `params.waves` - keep its array size the same.
+/// The waves: direction x, direction z, wavelength (m), height (m) - as
+/// they're meant to look; `waves` is what's drawn and floated on.
 const WAVES: [[f32; 4]; 3] = [
     [1.0, 0.2, 9.0, 0.22],
     [-0.4, 1.0, 5.5, 0.12],
@@ -41,10 +47,25 @@ const SEABED: f32 = -6.0;
 /// How wide the sea is, on each side.
 const SEA_SIZE: f32 = 120.0;
 
-/// The water's height at world `x`, `z` at `time` (seconds - the shaders'
+/// How often the waves repeat in the world (m), along x and z.
+const WORLD_PERIOD: f32 = 1024.0;
+
+/// `WAVES`, each nudged (well under 1%) to repeat every `WORLD_PERIOD`
+/// along x and z: its direction times `WORLD_PERIOD / wavelength` made
+/// whole numbers - the direction it's left with, and the wavelength that
+/// makes. The shader's `params.waves` - keep its array size the same.
+fn waves() -> [[f32; 4]; 3] {
+    WAVES.map(|[dx, dz, wavelength, height]| {
+        let cycles = (nalgebra::Vector2::new(dx, dz).normalize() * WORLD_PERIOD / wavelength).map(f32::round);
+        [cycles.x, cycles.y, WORLD_PERIOD / cycles.norm(), height]
+    })
+}
+
+/// The water's height at `x`, `z` in the waves (a scene position plus
+/// `app.origin.wrapped(WORLD_PERIOD)`) at `time` (seconds - the shaders'
 /// `engine.time`) - water.wgsl's `wave_height`, the same sum.
 fn wave_height(x: f32, z: f32, time: f32) -> f32 {
-    WAVES.iter().map(|[dx, dz, wavelength, height]| {
+    waves().iter().map(|[dx, dz, wavelength, height]| {
         let direction = nalgebra::Vector2::new(*dx, *dz).normalize();
         let k = std::f32::consts::TAU / wavelength;
         let phase = k * (direction.x * x + direction.y * z) - (GRAVITY * k).sqrt() * time;
@@ -80,6 +101,8 @@ impl Behavior for Buoyancy {
     fn fixed_update(&mut self, node: &mut Node, _scene: &mut SceneAccess, app: &mut App) {
         // The waves as they're drawn (the shaders' `engine.time`).
         let time = app.time.shader_time();
+        // Where the scene is in the waves (see `waves`).
+        let offset = app.origin.wrapped(WORLD_PERIOD);
         let dt = app.physics.timestep();
         let Some(body) = app.physics.body_mut(&node.id) else { return };
 
@@ -102,7 +125,7 @@ impl Behavior for Buoyancy {
                     let point = pose * local;
                     // How much of the cell is under the surface: 0 above it,
                     // 1 once its top is (a cell's height around its center).
-                    let depth = wave_height(point.x, point.z, time) - point.y;
+                    let depth = wave_height(point.x + offset.x, point.z + offset.z, time) - point.y;
                     let under = (depth / cell.y + 0.5).clamp(0.0, 1.0);
                     if under <= 0.0 {
                         continue;
@@ -183,13 +206,13 @@ impl WaterScene {
 impl SceneBehaviour for WaterScene {
     fn on_spawn(&mut self, scene: &mut Scene, app: &mut App) {
         // The sea: a fine grid for the waves to move, drawn with water.wgsl,
-        // its waves from WAVES.
-        let waves: Vec<f32> = WAVES.iter().flatten().copied().collect();
+        // its waves from `waves`, fixed in the world (see WORLD_PERIOD).
+        let waves: Vec<f32> = waves().iter().flatten().copied().collect();
         let sea = Node::new("sea")
             .with_property(Transform3D::default())
             .with_property(Mesh::plane(239)
                 .transform(Transform3D { scale: Vector3::new(SEA_SIZE, 1.0, SEA_SIZE), ..Default::default() })
-                .material(Material::shader("water").param("waves", waves)));
+                .material(Material::shader("water").param("waves", waves).world_period(WORLD_PERIOD)));
 
         // The seabed - a body for things to land on, and something for the
         // water to be deep over.

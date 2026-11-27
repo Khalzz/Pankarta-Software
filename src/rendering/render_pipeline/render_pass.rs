@@ -1061,19 +1061,24 @@ mod tests {
 }
 
 /// `material`'s params with the floating origin's offset added, for a
-/// texture tiled in the world (engine/tiled, see `Material::tiled`): where
-/// the scene's (0, 0, 0) is in the world, modulo the tile size - None (its
-/// own params as they are) for any other material, or while that offset is
-/// zero.
+/// shader whose pattern is fixed in the world (`Material::world_period`,
+/// and engine/tiled in the world): where the scene's (0, 0, 0) is in the
+/// world, modulo the period - None (its own params as they are) for any
+/// other material, or while that offset is zero.
 fn origin_params(material: &crate::scene_manager::node::properties::Material, origin: &crate::world_origin::WorldOrigin) -> Option<std::collections::BTreeMap<String, crate::rendering::shader_library::ParamValue>> {
-    if material.shader != crate::rendering::shader_library::TILED {
-        return None;
-    }
-    let first = |name: &str| material.params.get(name).and_then(|value| value.0.first().copied());
-    if first("world").is_none_or(|world| world <= 0.5) {
-        return None;
-    }
-    let offset = origin.wrapped(first("tile_size")?);
+    // engine/tiled's period is its tile size, in the world - read from its
+    // params, so a tiled material from a data file, or one whose tile size
+    // is changed while it's drawn (`Material::set`), is right too.
+    let period = if material.shader == crate::rendering::shader_library::TILED {
+        let first = |name: &str| material.params.get(name).and_then(|value| value.0.first().copied());
+        if first("world").is_none_or(|world| world <= 0.5) {
+            return None;
+        }
+        first("tile_size")?
+    } else {
+        material.world_period?
+    };
+    let offset = origin.wrapped(period);
     if offset == nalgebra::Vector3::zeros() {
         return None;
     }

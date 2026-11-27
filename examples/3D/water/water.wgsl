@@ -8,6 +8,11 @@ struct Params {
     waves: array<vec4<f32>, 3>,
     shallow: vec4<f32>,
     deep: vec4<f32>,
+    // Set by the engine (water.rs's `Material::world_period`): where the
+    // scene's (0, 0, 0) is in the waves, which repeat every WORLD_PERIOD -
+    // added to a scene position, so the sea stays put in the world when the
+    // floating origin moves.
+    origin_offset: vec3<f32>,
 }
 
 // The depth drawn so far (water.ron's `reads: [Depth]`) - read with
@@ -22,7 +27,8 @@ const TAU: f32 = 6.2831853;
 const SKY: vec3<f32> = vec3<f32>(0.60, 0.75, 0.90);
 const FOAM: vec3<f32> = vec3<f32>(0.95, 0.97, 1.0);
 
-// A wave's phase at `p` (world x, z) at time `t`: deep-water waves, the
+// A wave's phase at `p` (x, z in the waves: a scene position plus
+// `params.origin_offset`) at time `t`: deep-water waves, the
 // longer the faster.
 fn wave_phase(wave: vec4<f32>, p: vec2<f32>, t: f32) -> f32 {
     let k = TAU / wave.z;
@@ -51,13 +57,13 @@ fn wave_slope(p: vec2<f32>, t: f32) -> vec2<f32> {
 
 fn vertex(v: VertexIn) -> VertexIn {
     var moved = v;
-    let world = v.position + engine.camera_position;
+    let world = v.position + engine.camera_position + params.origin_offset;
     moved.position.y += wave_height(world.xz, engine.time);
     return moved;
 }
 
 fn fragment(f: FragmentIn) -> vec4<f32> {
-    let slope = wave_slope(f.world_position.xz, engine.time);
+    let slope = wave_slope(f.world_position.xz + params.origin_offset.xz, engine.time);
     let normal = normalize(vec3<f32>(-slope.x, 1.0, -slope.y));
 
     // How much water is between this point of the surface and whatever is

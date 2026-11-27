@@ -40,11 +40,15 @@ pub struct Material {
     /// place of its own texture - see `texture`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub texture: Option<String>,
+    /// How often its shader's pattern repeats in the world (m) - see
+    /// `world_period`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub world_period: Option<f32>,
 }
 
 impl Material {
     pub fn shader(name: impl Into<String>) -> Self {
-        Self { shader: name.into(), params: BTreeMap::new(), meshes: BTreeMap::new(), texture: None }
+        Self { shader: name.into(), params: BTreeMap::new(), meshes: BTreeMap::new(), texture: None, world_period: None }
     }
 
     /// engine/standard - the look every model has without a material.
@@ -67,7 +71,30 @@ impl Material {
     /// engine/tiled.
     pub fn tiled(mut self, tile_size: f32, space: TextureSpace) -> Self {
         self.shader = crate::rendering::shader_library::TILED.to_owned();
+        self.world_period = (space == TextureSpace::World).then_some(tile_size);
         self.param("tile_size", tile_size).param("world", if space == TextureSpace::World { 1.0 } else { 0.0 })
+    }
+
+    /// Builder: its shader draws a pattern that's fixed in the world and
+    /// repeats every `period` meters along x, y and z - a tiled floor,
+    /// noise, waves. Positions a shader sees are the scene's (the floating
+    /// origin's, see `WorldOrigin`), and those jump by whole kilometers each
+    /// time the origin moves - a pattern made from them alone jumps too.
+    /// With this, the engine sets the shader's `origin_offset: vec3<f32>`
+    /// param every frame (where the scene's (0, 0, 0) is in the world,
+    /// modulo `period`, worked out in f64): a pattern made from
+    /// `f.world_position + params.origin_offset` (or, in `vertex`,
+    /// `v.position + engine.camera_position + params.origin_offset`) stays
+    /// where it is in the world, however far out.
+    ///
+    /// The pattern must really repeat every `period` along each axis: a
+    /// wave `sin(k · p)` does when `k` is `TAU / period` times whole numbers
+    /// (see the water example). Game code that works out the same pattern
+    /// (things floating on those waves) adds `app.origin.wrapped(period)` to
+    /// its positions the same way.
+    pub fn world_period(mut self, period: f32) -> Self {
+        self.world_period = Some(period);
+        self
     }
 
     /// Builder: multiplies its texture by `color` - on its own, a plain
@@ -109,7 +136,7 @@ impl Material {
     /// params (it's the same as every other use of it), the node's own
     /// otherwise.
     pub fn key(&self, node: &str) -> String {
-        match (self.params.is_empty(), &self.texture) {
+        match (self.params.is_empty() && self.world_period.is_none(), &self.texture) {
             (true, None) => self.shader.clone(),
             // The same texture and shader on two nodes: one material, drawn
             // together.
@@ -120,7 +147,7 @@ impl Material {
 
     /// `key`, for this as the material of the mesh `mesh` of the node `node`.
     pub fn mesh_key(&self, node: &str, mesh: &str) -> String {
-        match (self.params.is_empty(), &self.texture) {
+        match (self.params.is_empty() && self.world_period.is_none(), &self.texture) {
             (true, None) => self.shader.clone(),
             (true, Some(texture)) => format!("{}|{texture}", self.shader),
             (false, _) => format!("{}@{node}/{mesh}", self.shader),
@@ -129,7 +156,7 @@ impl Material {
 
     /// Whether it's just engine/standard - nothing to put on a node.
     pub fn is_standard(&self) -> bool {
-        self.shader == crate::rendering::shader_library::STANDARD && self.params.is_empty() && self.meshes.is_empty() && self.texture.is_none()
+        self.shader == crate::rendering::shader_library::STANDARD && self.params.is_empty() && self.meshes.is_empty() && self.texture.is_none() && self.world_period.is_none()
     }
 }
 
